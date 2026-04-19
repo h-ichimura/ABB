@@ -64,9 +64,9 @@ a_Q_ml, MQ_ml, ainit_ml, Mi_ml, ae1_ml, ae3_ml, Me_ml = unpack_cspline(v_opt, K)
 
 # ---- QR (stochastic EM with FFBS E-step) ----
 t_qr = @elapsed begin
-    qr_est = estimate_cspline_qr(y, K, σy, tp.a_Q, tp.M_Q,
-                                   tp.a_init, tp.M_init,
-                                   tp.a_eps1, tp.a_eps3, tp.M_eps, τ;
+    qr_est = estimate_cspline_qr(y, K, σy, tp.a_Q,
+                                   tp.a_init,
+                                   tp.a_eps1, tp.a_eps3, τ;
                                    G=G, S_em=30, M_draws=10,
                                    verbose=false, seed=seed)
 end

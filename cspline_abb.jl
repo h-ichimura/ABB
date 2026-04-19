@@ -2122,7 +2122,7 @@ function estimate_cspline_ml(y::Matrix{Float64}, K::Int, σy::Float64,
 
     res = optimize(obj, grad!, v0,
                    LBFGS(; linesearch=LineSearches.BackTracking()),
-                   Optim.Options(iterations=maxiter, g_tol=1e-3,
+                   Optim.Options(iterations=maxiter, g_tol=1e-8,
                                  show_trace=verbose, show_every=10))
     v_opt = Optim.minimizer(res)
     @printf("  CSpline ML final obj: %.6f (iters=%d)\n",
@@ -2210,23 +2210,26 @@ function cspline_ffbs!(eta_draw::Matrix{Float64},
     filter_p = zeros(G, N, T_obs)
     p = zeros(G); p_new = zeros(G); pw = zeros(G)
 
-    # Forward pass
+    # Forward pass (logspace normalization — same as MLE's forward filter)
+    log_p_ffbs = zeros(G)
     @inbounds for i in 1:N
         for g in 1:G
-            f_e = exp(cspline_eval(y[i,1]-grid[g], a_eps_s, s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps) / C_eps
-            p[g] = f_init[g] * f_e
+            log_p_ffbs[g] = log(max(f_init[g], 1e-300)) +
+                cspline_eval(y[i,1]-grid[g], a_eps_s, s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps)
         end
-        L1 = dot(p, sw); p ./= L1
+        L1 = logspace_integrate(log_p_ffbs, grid, G)
+        for g in 1:G; p[g] = exp(log_p_ffbs[g]) / L1; end
         filter_p[:, i, 1] .= p
 
         for t_step in 2:T_obs
             pw .= p .* sw
             mul!(p_new, transpose(T_mat), pw)
             for g in 1:G
-                f_e = exp(cspline_eval(y[i,t_step]-grid[g], a_eps_s, s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps) / C_eps
-                p_new[g] *= f_e
+                log_p_ffbs[g] = log(max(p_new[g], 1e-300)) +
+                    cspline_eval(y[i,t_step]-grid[g], a_eps_s, s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps)
             end
-            Lt = dot(p_new, sw); p_new ./= Lt
+            Lt = logspace_integrate(log_p_ffbs, grid, G)
+            for g in 1:G; p_new[g] = exp(log_p_ffbs[g]) / Lt; end
             filter_p[:, i, t_step] .= p_new
             p .= p_new
         end
@@ -2347,10 +2350,18 @@ end
 #  Curvature parameters (M_Q, M_init, M_eps) held fixed at true values.
 # ================================================================
 
+# Estimate M from IQR: M = -1/σ², σ = IQR / (2Φ⁻¹(0.75))
+const _IQR_TO_M = -(2.0 * 0.6744897501960817)^2  # = -1.349²  ≈ -1.8208
+
+function _M_from_iqr(iqr::Float64)
+    iqr < 1e-10 && return -100.0  # fallback for degenerate case
+    _IQR_TO_M / (iqr * iqr)
+end
+
 function estimate_cspline_qr(y::Matrix{Float64}, K::Int, σy::Float64,
-                              a_Q0::Matrix{Float64}, M_Q::Float64,
-                              a_init0::Vector{Float64}, M_init::Float64,
-                              a_eps10::Float64, a_eps30::Float64, M_eps::Float64,
+                              a_Q0::Matrix{Float64},
+                              a_init0::Vector{Float64},
+                              a_eps10::Float64, a_eps30::Float64,
                               τ::Vector{Float64};
                               G::Int=201, S_em::Int=50, M_draws::Int=20,
                               verbose::Bool=true, seed::Int=1)
@@ -2360,6 +2371,11 @@ function estimate_cspline_qr(y::Matrix{Float64}, K::Int, σy::Float64,
     a_Q = copy(a_Q0)
     a_init = copy(a_init0)
     a_eps1 = a_eps10; a_eps3 = a_eps30
+
+    # Initialize M from initial quantile estimates
+    M_Q = _M_from_iqr(a_Q[1,3] - a_Q[1,1])       # IQR at η=0
+    M_init = _M_from_iqr(a_init[3] - a_init[1])
+    M_eps = _M_from_iqr(a_eps3 - a_eps1)
 
     eta_draw = zeros(N, T_obs)
 
@@ -2384,14 +2400,20 @@ function estimate_cspline_qr(y::Matrix{Float64}, K::Int, σy::Float64,
         a_eps1 = ae1_sum / M_draws
         a_eps3 = ae3_sum / M_draws
 
+        # Update M from estimated quantile knots
+        M_Q = _M_from_iqr(a_Q[1,3] - a_Q[1,1])
+        M_init = _M_from_iqr(a_init[3] - a_init[1])
+        M_eps = _M_from_iqr(a_eps3 - a_eps1)
+
         if verbose && (iter <= 5 || iter % 10 == 0)
-            @printf("  QR iter %3d: ρ=%.4f  a_init=[%.3f,%.3f,%.3f]  a_eps=[%.3f,%.3f]\n",
-                    iter, a_Q[2,2], a_init..., a_eps1, a_eps3)
+            @printf("  QR iter %3d: ρ=%.4f  a_init=[%.3f,%.3f,%.3f]  a_eps=[%.3f,%.3f]  M_Q=%.2f\n",
+                    iter, a_Q[2,2], a_init..., a_eps1, a_eps3, M_Q)
             flush(stdout)
         end
     end
 
-    (a_Q=a_Q, a_init=a_init, a_eps1=a_eps1, a_eps3=a_eps3)
+    (a_Q=a_Q, a_init=a_init, a_eps1=a_eps1, a_eps3=a_eps3,
+     M_Q=M_Q, M_init=M_init, M_eps=M_eps)
 end
 
 # ================================================================
@@ -2442,9 +2464,9 @@ function mc_comparison(; S::Int=20, N::Int=300, G::Int=201,
 
         # QR (warm start from truth, curvatures fixed at truth)
         qr_time[s] = @elapsed begin
-            qr_est = estimate_cspline_qr(y, K, σy, tp.a_Q, tp.M_Q,
-                                           tp.a_init, tp.M_init,
-                                           tp.a_eps1, tp.a_eps3, tp.M_eps, τ;
+            qr_est = estimate_cspline_qr(y, K, σy, tp.a_Q,
+                                           tp.a_init,
+                                           tp.a_eps1, tp.a_eps3, τ;
                                            G=G, S_em=qr_S_em, M_draws=qr_M_draws,
                                            verbose=false, seed=s)
         end
