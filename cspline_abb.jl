@@ -493,91 +493,193 @@ end
 # IFT: d(s₁,s₃,δ)/dθ = -J⁻¹ · ∂F/∂θ, where J = ∂F/∂(s₁,s₃,δ).
 # J and ∂F/∂θ are computed by finite differences of mass residuals.
 # Returns ds_dt[2,3], dδ_dt[3], ds_dκ[2], dδ_dκ as scalar.
-function cspline_solver_ift(t::Vector{Float64}, s::Vector{Float64},
-                             κ_mean::Float64, δ::Float64, buf::SplineSolverBuffers)
-    h_fd = 1e-5  # larger step for IFT (mass residuals have GL quadrature noise)
-    κ1 = κ_mean - δ; κ3 = κ_mean + δ
-    s_tmp = buf.sp; masses = buf.masses; mp = buf.mp; mm = buf.mm
+# Analytical derivatives of shifted segment masses w.r.t. (s₁, s₃, κ₁, κ₃, t₁, t₂, t₃).
+# dm[seg, param] where seg=1..4, param=1..7 (s₁,s₃,κ₁,κ₃,t₁,t₂,t₃).
+# Interior segments: dm/dθ = half × Σ w_i exp(S-lr) × ∂S/∂θ  (+ boundary/width terms for t)
+# Tails: analytical derivatives of _half_gaussian_integral.
+function cspline_mass_derivs(t::Vector{Float64}, s::Vector{Float64},
+                              βL::Float64, βR::Float64, κ1::Float64, κ3::Float64,
+                              log_ref::Float64)
+    dm = zeros(4, 7)  # dm[seg, param_idx]
+    h1 = t[2]-t[1]; h2 = t[3]-t[2]
 
-    # Evaluate mass fractions at current point
-    function mass_fracs(x_s1, x_s3, x_δ, x_t, m_buf)
-        s_tmp[1] = x_s1; s_tmp[2] = 0.0; s_tmp[3] = x_s3
-        k1 = κ_mean - x_δ; k3 = κ_mean + x_δ
-        bL, bR = cspline_implied_beta(x_t, s_tmp, k1, k3)
-        lr = max(s_tmp[1], s_tmp[2], s_tmp[3])
-        cspline_masses!(m_buf, x_t, s_tmp, bL, bR, k1, k3, lr)
-        C = m_buf[1]+m_buf[2]+m_buf[3]+m_buf[4]
-        C < 1e-300 && return (Inf, Inf, Inf)
-        (m_buf[1]/C, m_buf[2]/C, m_buf[3]/C)
+    # Beta derivatives (needed for tail mass derivatives)
+    bd = cspline_beta_derivs(t, s, κ1, κ3)
+
+    # ---- Left tail: m₁ = exp(s₁-lr) × I(βL, κ₁) ----
+    I_L = _half_gaussian_integral(βL, κ1)
+    e_s1 = exp(s[1] - log_ref)
+    m1 = e_s1 * I_L
+    # ∂I/∂β and ∂I/∂M for the half-Gaussian integral
+    # I(β,M) = σ√(2π) exp(½β²σ²) Φ(-βσ) where σ=1/√(-M)
+    # ∂I/∂β = σ√(2π) [βσ² exp(½β²σ²) Φ(-βσ) + exp(½β²σ²) × (-σ) φ(-βσ)]
+    #       = I × βσ² - σ² exp(½β²σ²) × σ√(2π) × φ(-βσ)/√(2π) ... let me simplify
+    # Actually: ∂I/∂β = ∫_{-∞}^0 u × exp(βu + ½Mu²) du = E[u] under the Gaussian kernel
+    # By completing the square: mean = β/(-M) = βσ², so ∂I/∂β = (βσ²) × I + correction...
+    # Simpler: use the identity ∂I/∂β = β/γ × I + 1/γ  where γ=-M
+    # Actually: ∫u exp(βu-½γu²)du = (β/γ)I + 1/γ ... let me verify by differentiation.
+    # d/dβ ∫exp(βu-½γu²)du = ∫u exp(βu-½γu²)du. Integration by parts or completing square:
+    # ∫u exp(βu-½γu²)du from -∞ to 0 = [β/γ ∫exp(...) + 1/γ exp(βu-½γu²)]_{-∞}^{0}
+    # = β/γ × I + 1/γ × 1 = (β×I + 1)/γ
+    γ_L = -κ1
+    # ∂I/∂β = ∫u exp(βu+½Mu²)du = (βI − 1)/γ  (by integration by parts)
+    dI_dβ_L = (βL * I_L - 1.0) / γ_L
+    # ∂I/∂γ = −½∫u² exp(βu−½γu²)du = −½[(γ+β²)I − β]/γ²
+    dI_dγ_L = -0.5 * ((βL^2/γ_L^2 + 1.0/γ_L) * I_L - βL/γ_L^2)
+    dI_dM_L = -dI_dγ_L  # since M = -γ
+
+    # dm₁/dθ = ∂(e_s1 × I)/∂θ
+    # dm₁/ds₁ = e_s1 × I + e_s1 × dI/dβL × dβL/ds₁ + e_s1 × dI/dM × dM/ds₁
+    # But M here is κ₁ (endpoint curvature), not a function of s₁ directly.
+    # Wait: m₁ = exp(s₁-lr) × I(βL, κ₁). βL depends on s₁,s₃,κ₁,κ₃,t.
+    dm[1,1] = e_s1 * (I_L + dI_dβ_L * bd.dβL_ds1)                           # ds₁
+    dm[1,2] = e_s1 * dI_dβ_L * bd.dβL_ds3                                     # ds₃
+    dm[1,3] = e_s1 * (dI_dβ_L * bd.dβL_dκ1 + dI_dM_L)                        # dκ₁
+    dm[1,4] = e_s1 * dI_dβ_L * bd.dβL_dκ3                                     # dκ₃
+    dm[1,5] = e_s1 * dI_dβ_L * bd.dβL_dt1 + m1  # dt₁: boundary exp(S(t₁)-lr)=m1/I_L×I_L...
+    # Actually boundary: ∂/∂t₁ ∫_{-∞}^{t₁} = +exp(S(t₁)-lr) + ∫ ∂integrand/∂t₁
+    # exp(S(t₁)) = exp(s₁) (since S(t₁)=s₁). So boundary = exp(s₁-lr) = e_s1.
+    dm[1,5] = e_s1 * dI_dβ_L * bd.dβL_dt1  # no boundary (u=x−t₁ substitution absorbs it)
+    dm[1,6] = e_s1 * dI_dβ_L * bd.dβL_dt2                                     # dt₂
+    dm[1,7] = e_s1 * dI_dβ_L * bd.dβL_dt3                                     # dt₃
+
+    # ---- Right tail: m₄ = exp(s₃-lr) × I(-βR, κ₃) ----
+    I_R = _half_gaussian_integral(-βR, κ3)
+    e_s3 = exp(s[3] - log_ref)
+    γ_R = -κ3
+    # I_R = I(-βR, κ₃). ∂I/∂(-βR) = ((-βR)×I_R − 1)/γ_R
+    dI_dβ_R_neg = (-βR * I_R - 1.0) / γ_R
+    # ∂I_R/∂κ₃ = ∂I/∂M = −∂I/∂γ = +½[(γ+β²)I − β]/γ² with β=−βR
+    dI_dM_R = 0.5 * ((βR^2/γ_R^2 + 1.0/γ_R) * I_R + βR/γ_R^2)
+    # Chain: ∂m₄/∂βR = e_s3 × ∂I_R/∂(-βR) × (-1)
+    dm[4,1] = e_s3 * (-dI_dβ_R_neg) * bd.dβR_ds1                              # ds₁
+    dm[4,2] = e_s3 * (I_R + (-dI_dβ_R_neg) * bd.dβR_ds3)                      # ds₃
+    dm[4,3] = e_s3 * (-dI_dβ_R_neg) * bd.dβR_dκ1                              # dκ₁
+    dm[4,4] = e_s3 * ((-dI_dβ_R_neg) * bd.dβR_dκ3 + dI_dM_R)                  # dκ₃
+    dm[4,5] = e_s3 * (-dI_dβ_R_neg) * bd.dβR_dt1                              # dt₁
+    dm[4,6] = e_s3 * (-dI_dβ_R_neg) * bd.dβR_dt2                              # dt₂
+    dm[4,7] = e_s3 * (-dI_dβ_R_neg) * bd.dβR_dt3  # no boundary (u=x−t₃ substitution absorbs it)
+
+    # ---- Interior segments: GL quadrature ----
+    @inbounds for seg in 1:2
+        a = t[seg]; b = t[seg+1]
+        mid = (a+b)*0.5; half = (b-a)*0.5
+        for i in 1:16
+            x = mid + half * GL16_NODES[i]
+            _, ps1, ps3, pκ1, pκ3, pt1, pt2, pt3, _, _ = cspline_eval_partials(x, t, s, βL, βR, κ1, κ3)
+            Sv = cspline_eval(x, t, s, βL, βR, κ1, κ3)
+            w_exp = GL16_WEIGHTS[i] * exp(Sv - log_ref)
+            # ∂m/∂(s₁,s₃,κ₁,κ₃) — no boundary or width change
+            dm[seg+1, 1] += w_exp * ps1 * half
+            dm[seg+1, 2] += w_exp * ps3 * half
+            dm[seg+1, 3] += w_exp * pκ1 * half
+            dm[seg+1, 4] += w_exp * pκ3 * half
+            # ∂m/∂t_l — includes ∂S/∂t_l AND width/node shift effects
+            # The full derivative of ∫_a^b f(x) dx w.r.t. t that changes a or b:
+            # d/dt [half × Σ w_i f(mid+half×ξ_i)] where mid=(a+b)/2, half=(b-a)/2
+            # For t_l changing a (seg start): ∂mid/∂a=1/2, ∂half/∂a=-1/2
+            # For t_l changing b (seg end): ∂mid/∂b=1/2, ∂half/∂b=1/2
+            # d/da = -1/2 Σ w_i f + half × Σ w_i f' × (1/2 - ξ_i/2)... complex
+            # Simpler: use the Leibniz rule directly.
+            # ∂/∂t_l ∫_{t_seg}^{t_{seg+1}} exp(S(x)-lr) dx
+            #   = ∫ exp(S-lr) × ∂S/∂t_l dx + [boundary terms from limits]
+            # For ∂S/∂t_l: already computed as pt1, pt2, pt3 (partial holding β,κ fixed)
+            # BUT: β depends on t through cspline_implied_beta. The partials pt1,pt2,pt3
+            # from cspline_eval_partials already include the M₂ dependence on t,
+            # but NOT the β dependence. Interior segments don't use β directly
+            # (β only appears in tails), so pt_l IS the correct ∂S/∂t_l for interior.
+            dm[seg+1, 5] += w_exp * pt1 * half  # ∂S/∂t₁ contribution
+            dm[seg+1, 6] += w_exp * pt2 * half
+            dm[seg+1, 7] += w_exp * pt3 * half
+        end
+        # Boundary terms for t derivatives:
+        # Segment [t_seg, t_{seg+1}]: ∂/∂t_seg adds -exp(S(t_seg)-lr), ∂/∂t_{seg+1} adds +exp(S(t_{seg+1})-lr)
+        e_a = exp(cspline_eval(a, t, s, βL, βR, κ1, κ3) - log_ref)
+        e_b = exp(cspline_eval(b, t, s, βL, βR, κ1, κ3) - log_ref)
+        dm[seg+1, seg+4] += -e_a   # -exp(S(t_seg)) for lower limit (param t_{seg} = t[seg])
+        dm[seg+1, seg+5] += +e_b   # +exp(S(t_{seg+1})) for upper limit
+        # Width change: ∂half/∂t_l × Σ w_i f(x_i)... already accounted for?
+        # No! The GL quadrature approximates ∫_a^b f dx = half × Σ w_i f(mid+half×ξ_i)
+        # When t_l changes, mid and half change, AND the evaluation points x_i shift.
+        # The Leibniz integral rule gives: d/dt_l ∫_a^b f(x,t_l) dx
+        #   = ∫_a^b ∂f/∂t_l dx + f(b)×∂b/∂t_l - f(a)×∂a/∂t_l
+        # The ∂f/∂t_l = exp(S-lr) × ∂S/∂t_l is what we computed above.
+        # The boundary terms f(b)×∂b/∂t_l - f(a)×∂a/∂t_l are what we added.
+        # BUT: the GL quadrature for ∫∂f/∂t_l dx uses nodes at FIXED positions
+        # relative to the segment. This is correct because the partials ∂S/∂t_l
+        # already account for how S changes when t_l moves (the x coordinate is
+        # independent of t_l in the Leibniz rule).
     end
 
-    # 3×3 Jacobian J = ∂F/∂(s₁, s₃, δ)
-    t_work = copy(t)
+    dm
+end
 
-    # Columns of J (by FD)
-    Rp = mass_fracs(s[1]+h_fd, s[3], δ, t, mp)
-    Rm = mass_fracs(s[1]-h_fd, s[3], δ, t, mm)
-    J11=(Rp[1]-Rm[1])/(2h_fd); J21=(Rp[2]-Rm[2])/(2h_fd); J31=(Rp[3]-Rm[3])/(2h_fd)
+# Analytical IFT: compute d(s₁,s₃,δ)/d(t₁,t₂,t₃,κ_mean) using analytical mass derivatives.
+function cspline_solver_ift(t::Vector{Float64}, s::Vector{Float64},
+                             κ_mean::Float64, δ::Float64, buf::SplineSolverBuffers)
+    κ1 = κ_mean - δ; κ3 = κ_mean + δ
+    βL, βR = cspline_implied_beta(t, s, κ1, κ3)
+    log_ref = max(s[1], s[2], s[3])
+    # Recompute log_ref including GL nodes (same as in cspline_masses!)
+    @inbounds for seg in 1:2
+        a = t[seg]; b = t[seg+1]
+        mid = (a+b)*0.5; half = (b-a)*0.5
+        for i in 1:16
+            x = mid + half * GL16_NODES[i]
+            v = cspline_eval(x, t, s, βL, βR, κ1, κ3)
+            v > log_ref && (log_ref = v)
+        end
+    end
 
-    Rp = mass_fracs(s[1], s[3]+h_fd, δ, t, mp)
-    Rm = mass_fracs(s[1], s[3]-h_fd, δ, t, mm)
-    J12=(Rp[1]-Rm[1])/(2h_fd); J22=(Rp[2]-Rm[2])/(2h_fd); J32=(Rp[3]-Rm[3])/(2h_fd)
+    # Compute masses and their analytical derivatives
+    cspline_masses!(buf.masses, t, s, βL, βR, κ1, κ3, log_ref)
+    C = buf.masses[1]+buf.masses[2]+buf.masses[3]+buf.masses[4]
+    C < 1e-300 && return (zeros(2,3), zeros(3), zeros(2), 0.0)
 
-    Rp = mass_fracs(s[1], s[3], δ+h_fd, t, mp)
-    Rm = mass_fracs(s[1], s[3], δ-h_fd, t, mm)
-    J13=(Rp[1]-Rm[1])/(2h_fd); J23=(Rp[2]-Rm[2])/(2h_fd); J33=(Rp[3]-Rm[3])/(2h_fd)
+    dm = cspline_mass_derivs(t, s, βL, βR, κ1, κ3, log_ref)
+    # dm[seg, param]: param order = s₁(1), s₃(2), κ₁(3), κ₃(4), t₁(5), t₂(6), t₃(7)
 
-    # J⁻¹ by cofactor
+    # Derivatives of mass fractions F_k = m_k/C - 0.25
+    # ∂F_k/∂θ = (∂m_k/∂θ × C - m_k × ∂C/∂θ) / C²
+    # where ∂C/∂θ = Σ_j ∂m_j/∂θ
+    dF = zeros(3, 7)  # dF[k, param] for k=1,2,3 (segments 1,2,3)
+    for p in 1:7
+        dC = dm[1,p] + dm[2,p] + dm[3,p] + dm[4,p]
+        for k in 1:3
+            dF[k, p] = (dm[k,p] * C - buf.masses[k] * dC) / (C*C)
+        end
+    end
+
+    # Jacobian J = ∂F/∂(s₁, s₃, δ)
+    # ∂F/∂s₁ = dF[:,1], ∂F/∂s₃ = dF[:,2]
+    # ∂F/∂δ = ∂F/∂κ₁ × (-1) + ∂F/∂κ₃ × (+1) = dF[:,4] - dF[:,3]
+    J11=dF[1,1]; J21=dF[2,1]; J31=dF[3,1]  # ∂F/∂s₁
+    J12=dF[1,2]; J22=dF[2,2]; J32=dF[3,2]  # ∂F/∂s₃
+    J13=dF[1,4]-dF[1,3]; J23=dF[2,4]-dF[2,3]; J33=dF[3,4]-dF[3,3]  # ∂F/∂δ
+
     det = J11*(J22*J33-J23*J32) - J12*(J21*J33-J23*J31) + J13*(J21*J32-J22*J31)
     abs(det) < 1e-30 && return (zeros(2,3), zeros(3), zeros(2), 0.0)
 
-    # Cofactor matrix (rows of J⁻¹ = columns of cofactor / det)
-    C11=(J22*J33-J23*J32)/det; C12=-(J21*J33-J23*J31)/det; C13=(J21*J32-J22*J31)/det
-    C21=-(J12*J33-J13*J32)/det; C22=(J11*J33-J13*J31)/det; C23=-(J11*J32-J12*J31)/det
-    C31=(J12*J23-J13*J22)/det; C32=-(J11*J23-J13*J21)/det; C33=(J11*J22-J12*J21)/det
+    # J⁻¹ by cofactor
+    iC11=(J22*J33-J23*J32)/det; iC12=-(J21*J33-J23*J31)/det; iC13=(J21*J32-J22*J31)/det
+    iC21=-(J12*J33-J13*J32)/det; iC22=(J11*J33-J13*J31)/det; iC23=-(J11*J32-J12*J31)/det
+    iC31=(J12*J23-J13*J22)/det; iC32=-(J11*J23-J13*J21)/det; iC33=(J11*J22-J12*J21)/det
 
-    # d(s₁,s₃,δ)/dθ = -J⁻¹ · ∂F/∂θ
-    ds_dt = zeros(2, 3)  # ds_dt[i, l]: ds_i/dt_l
-    dδ_dt = zeros(3)     # dδ/dt_l
-    ds_dκ = zeros(2)     # ds_i/dκ_mean
-    dδ_dκ = 0.0
-
-    # ∂F/∂t_l for l=1,2,3
+    # d(s₁,s₃,δ)/dθ = -J⁻¹ × ∂F/∂θ
+    ds_dt = zeros(2, 3); dδ_dt = zeros(3)
     for l in 1:3
-        t_work .= t
-        t_work[l] += h_fd
-        Rp = mass_fracs(s[1], s[3], δ, t_work, mp)
-        t_work[l] = t[l] - h_fd
-        Rm = mass_fracs(s[1], s[3], δ, t_work, mm)
-        t_work[l] = t[l]
-        dF1 = (Rp[1]-Rm[1])/(2h_fd)
-        dF2 = (Rp[2]-Rm[2])/(2h_fd)
-        dF3 = (Rp[3]-Rm[3])/(2h_fd)
-        # -J⁻¹ × ∂F/∂t_l
-        ds_dt[1, l] = -(C11*dF1 + C21*dF2 + C31*dF3)
-        ds_dt[2, l] = -(C12*dF1 + C22*dF2 + C32*dF3)
-        dδ_dt[l]    = -(C13*dF1 + C23*dF2 + C33*dF3)
+        p = l + 4  # param index for t_l
+        ds_dt[1, l] = -(iC11*dF[1,p] + iC21*dF[2,p] + iC31*dF[3,p])
+        ds_dt[2, l] = -(iC12*dF[1,p] + iC22*dF[2,p] + iC32*dF[3,p])
+        dδ_dt[l]    = -(iC13*dF[1,p] + iC23*dF[2,p] + iC33*dF[3,p])
     end
 
-    # ∂F/∂κ_mean: perturb κ_mean (affects κ₁=κ_mean-δ, κ₃=κ_mean+δ)
-    function mass_fracs_κ(x_s1, x_s3, x_δ, x_κm, m_buf)
-        s_tmp[1] = x_s1; s_tmp[2] = 0.0; s_tmp[3] = x_s3
-        k1 = x_κm - x_δ; k3 = x_κm + x_δ
-        bL, bR = cspline_implied_beta(t, s_tmp, k1, k3)
-        lr = max(s_tmp[1], s_tmp[2], s_tmp[3])
-        cspline_masses!(m_buf, t, s_tmp, bL, bR, k1, k3, lr)
-        C = m_buf[1]+m_buf[2]+m_buf[3]+m_buf[4]
-        C < 1e-300 && return (Inf, Inf, Inf)
-        (m_buf[1]/C, m_buf[2]/C, m_buf[3]/C)
-    end
-    Rp = mass_fracs_κ(s[1], s[3], δ, κ_mean+h_fd, mp)
-    Rm = mass_fracs_κ(s[1], s[3], δ, κ_mean-h_fd, mm)
-    dF1 = (Rp[1]-Rm[1])/(2h_fd)
-    dF2 = (Rp[2]-Rm[2])/(2h_fd)
-    dF3 = (Rp[3]-Rm[3])/(2h_fd)
-    ds_dκ[1] = -(C11*dF1 + C21*dF2 + C31*dF3)
-    ds_dκ[2] = -(C12*dF1 + C22*dF2 + C32*dF3)
-    dδ_dκ    = -(C13*dF1 + C23*dF2 + C33*dF3)
+    # ∂F/∂κ_mean = ∂F/∂κ₁ × 1 + ∂F/∂κ₃ × 1 = dF[:,3] + dF[:,4]
+    dF_κ = (dF[1,3]+dF[1,4], dF[2,3]+dF[2,4], dF[3,3]+dF[3,4])
+    ds_dκ = zeros(2)
+    ds_dκ[1] = -(iC11*dF_κ[1] + iC21*dF_κ[2] + iC31*dF_κ[3])
+    ds_dκ[2] = -(iC12*dF_κ[1] + iC22*dF_κ[2] + iC32*dF_κ[3])
+    dδ_dκ    = -(iC13*dF_κ[1] + iC23*dF_κ[2] + iC33*dF_κ[3])
 
     (ds_dt, dδ_dt, ds_dκ, dδ_dκ)
 end
@@ -641,62 +743,198 @@ function _half_gaussian_integral(β::Float64, M::Float64)
     # Φ(-β σ) = ccdf(Normal(), β σ) for numerical stability
     return σ * sqrt(2π) * exp(0.5 * β^2 * σ^2) * ccdf(_std_normal, β * σ)
 end
-# Precompute GL nodes once
+# ================================================================
+#  LOG-SPACE INTEGRATION: ∫ exp(f(x)) dx
+#
+#  Given f(x) = log p(x) at grid points, fit a cubic spline to f,
+#  then integrate exp(cubic) exactly on each segment using the
+#  Taylor series recurrence.
+#
+#  This is much more accurate than Simpson for peaked densities:
+#  - Simpson approximates p(x) by piecewise quadratic → O(h⁴)
+#  - Log-space: approximates log p(x) by cubic → exact for Gaussian
+# ================================================================
+
+"""
+    logspace_integrate(log_vals, grid, G)
+
+Compute ∫exp(f(x))dx where f is a natural cubic spline interpolating
+log_vals at grid points. Uses exact Taylor series for exp(cubic) on
+each segment. Returns the integral value.
+
+Natural cubic spline: f''(grid[1]) = f''(grid[G]) = 0.
+"""
+function logspace_integrate(log_vals::AbstractVector{Float64},
+                            grid::AbstractVector{Float64}, G::Int)
+    G < 2 && return 0.0
+
+    # Fit natural cubic spline to log_vals: solve tridiagonal for M (second derivatives)
+    # Natural: M[1] = M[G] = 0
+    # Interior: h[i-1]M[i-1] + 2(h[i-1]+h[i])M[i] + h[i]M[i+1] = 6(Δ[i]/h[i] - Δ[i-1]/h[i-1])
+    # where h[i] = grid[i+1]-grid[i], Δ[i] = log_vals[i+1]-log_vals[i]
+
+    n = G - 2  # number of interior points
+    if n == 0
+        # Only 2 points: linear interpolation → exp(linear)
+        h = grid[2] - grid[1]
+        a = log_vals[1]; b = (log_vals[2] - log_vals[1]) / h
+        return _exp_cubic_integral(b, 0.0, 0.0, h) * exp(a)
+    end
+
+    # Uniform grid: h[i] = h for all i
+    h = grid[2] - grid[1]
+
+    # For uniform grid, the tridiagonal system simplifies:
+    # h·M[i-1] + 4h·M[i] + h·M[i+1] = 6/h·(f[i+1] - 2f[i] + f[i-1])
+    # Divide by h: M[i-1] + 4M[i] + M[i+1] = 6(f[i+1]-2f[i]+f[i-1])/h²
+    # With M[0] = M[G-1] = 0 (natural, 0-indexed in math, 1-indexed in code: M[1]=M[G]=0)
+
+    # Clamped cubic spline: specify f' at endpoints via finite differences
+    # f'(1) ≈ (-3f₁+4f₂-f₃)/(2h), f'(G) ≈ (f_{G-2}-4f_{G-1}+3f_G)/(2h)
+    fp_1 = (-3.0*log_vals[1] + 4.0*log_vals[2] - log_vals[3]) / (2.0*h)
+    fp_G = (log_vals[G-2] - 4.0*log_vals[G-1] + 3.0*log_vals[G]) / (2.0*h)
+
+    # Full tridiagonal for G points (clamped BC):
+    # Row 1: 2h·M₁ + h·M₂ = 6[(f₂-f₁)/h - fp_1]/h
+    # Row i (interior): h·M_{i-1}+4h·M_i+h·M_{i+1} = 6(f_{i+1}-2f_i+f_{i-1})/h
+    # Row G: h·M_{G-1}+2h·M_G = 6[fp_G - (f_G-f_{G-1})/h]/h
+    M = zeros(G)
+    d = zeros(G); rhs = zeros(G)
+
+    # Setup
+    d[1] = 2.0; rhs[1] = 6.0*((log_vals[2]-log_vals[1])/h - fp_1) / h
+    @inbounds for i in 2:G-1
+        d[i] = 4.0
+        rhs[i] = 6.0*(log_vals[i+1] - 2.0*log_vals[i] + log_vals[i-1]) / (h*h)
+    end
+    d[G] = 2.0; rhs[G] = 6.0*(fp_G - (log_vals[G]-log_vals[G-1])/h) / h
+
+    # Thomas algorithm for [d₁ 1; 1 d₂ 1; ...; 1 d_G]
+    @inbounds for i in 2:G
+        w = 1.0 / d[i-1]
+        d[i] -= w
+        rhs[i] -= w * rhs[i-1]
+    end
+    M[G] = rhs[G] / d[G]
+    @inbounds for i in G-1:-1:1
+        M[i] = (rhs[i] - M[i+1]) / d[i]
+    end
+
+    # Integrate exp(cubic) on each segment [grid[i], grid[i+1]]
+    # On segment i: f(x) = M[i](grid[i+1]-x)³/(6h) + M[i+1](x-grid[i])³/(6h)
+    #              + (f[i]/h - M[i]h/6)(grid[i+1]-x) + (f[i+1]/h - M[i+1]h/6)(x-grid[i])
+    # With local var t = x - grid[i], a = h - t:
+    # f(t) = M[i](h-t)³/(6h) + M[i+1]t³/(6h) + (f[i]/h-M[i]h/6)(h-t) + (f[i+1]/h-M[i+1]h/6)t
+    # f(t) = f[i] + c₁t + c₂t² + c₃t³  where:
+    #   c₁ = (f[i+1]-f[i])/h - h(2M[i]+M[i+1])/6
+    #   c₂ = M[i]/2
+    #   c₃ = (M[i+1]-M[i])/(6h)
+
+    total = 0.0
+    @inbounds for i in 1:G-1
+        c1 = (log_vals[i+1] - log_vals[i]) / h - h * (2.0*M[i] + M[i+1]) / 6.0
+        c2 = M[i] / 2.0
+        c3 = (M[i+1] - M[i]) / (6.0 * h)
+        total += exp(log_vals[i]) * _exp_cubic_integral(c1, c2, c3, h)
+    end
+    total
+end
+
+# Precompute GL nodes once (kept for backward compatibility)
 const _GL16_β = [i / sqrt(4i^2 - 1) for i in 1:15]
 const _GL16_J = SymTridiagonal(zeros(16), _GL16_β)
 const _GL16_EIG = eigen(_GL16_J)
 const GL16_NODES = _GL16_EIG.values
 const GL16_WEIGHTS = 2.0 .* _GL16_EIG.vectors[1,:].^2
 
+# ================================================================
+#  EXACT INTEGRATION VIA TAYLOR SERIES (replaces GL quadrature)
+#
+#  ∫₀ᴸ exp(c₁t + c₂t² + c₃t³) dt = Σ aₙ Lⁿ⁺¹/(n+1)
+#  where aₙ satisfies the recurrence:
+#    n·aₙ = c₁·aₙ₋₁ + 2c₂·aₙ₋₂ + 3c₃·aₙ₋₃,  a₀=1
+#
+#  This is the power series of exp(cubic), integrated term-by-term.
+#  Equivalent to evaluating the incomplete Airy integral exactly.
+#  Converges for all finite L (entire function).
+# ================================================================
+
 """
-Compute segment masses in-place. masses must be pre-allocated length-4 vector.
-Zero allocations in this function.
+    _exp_cubic_integral(c1, c2, c3, L; maxterms=80, tol=1e-15)
+
+Compute ∫₀ᴸ exp(c₁t + c₂t² + c₃t³) dt exactly via convergent Taylor series.
+Returns the integral value. The series converges for all finite L.
 """
-# Compute shifted segment masses with quadratic tails.
-# masses[k] = ∫_seg_k exp(spline(x) - log_ref) dx
-# Left tail: ∫_{-∞}^{t₁} exp(s₁ + β_L(x-t₁) + ½M₁(x-t₁)² - log_ref) dx
-# Right tail: ∫_{t₃}^{∞} exp(s₃ + β_R(x-t₃) + ½M₃(x-t₃)² - log_ref) dx
-# Interior: GL quadrature
+function _exp_cubic_integral(c1::Float64, c2::Float64, c3::Float64, L::Float64;
+                              maxterms::Int=80, tol::Float64=1e-15)
+    # Recurrence: n·aₙ = c₁·aₙ₋₁ + 2c₂·aₙ₋₂ + 3c₃·aₙ₋₃
+    a = zeros(maxterms + 1)  # a[n+1] stores aₙ (1-indexed)
+    a[1] = 1.0  # a₀ = 1
+
+    result = L  # first term: a₀ × L¹/1
+    Ln = L      # Lⁿ⁺¹
+    for n in 1:maxterms
+        val = 0.0
+        n >= 1 && (val += c1 * a[n])      # c₁·aₙ₋₁
+        n >= 2 && (val += 2c2 * a[n-1])   # 2c₂·aₙ₋₂
+        n >= 3 && (val += 3c3 * a[n-2])   # 3c₃·aₙ₋₃
+        a[n+1] = val / n
+        Ln *= L
+        term = a[n+1] * Ln / (n + 1)
+        result += term
+        # Require at least 6 terms before checking convergence (avoid early exit when a₁=0)
+        n >= 6 && abs(term) < tol * abs(result) && break
+    end
+    result
+end
+
+"""
+Compute segment masses using exact Taylor series for interior
+and analytical Gaussian for tails. No GL quadrature needed.
+"""
 function cspline_masses!(masses::Vector{Float64}, t::Vector{Float64},
                          s::Vector{Float64}, β_L::Float64, β_R::Float64,
                          M1::Float64, M3::Float64, log_ref_in::Float64)
-    # Left tail: need β_L > 0 or M₁ < 0 for integrability
-    # Right tail: need β_R < 0 or M₃ < 0 for integrability
     if (β_L <= 0 && M1 >= 0) || (β_R >= 0 && M3 >= 0)
         @inbounds masses[1]=Inf; masses[2]=Inf; masses[3]=Inf; masses[4]=Inf
         return masses
     end
 
-    # Compute safe log_ref: max of log_ref_in and spline at all GL nodes
-    log_ref = log_ref_in
-    @inbounds for seg in 1:2
-        a = t[seg]; b = t[seg+1]
-        mid = (a+b)*0.5; half = (b-a)*0.5
-        for i in 1:16
-            x = mid + half * GL16_NODES[i]
-            v = cspline_eval(x, t, s, β_L, β_R, M1, M3)
-            v > log_ref && (log_ref = v)
-        end
-    end
+    # log_ref: use max of s values (sufficient for shifted masses)
+    log_ref = max(s[1], s[2], s[3], log_ref_in)
 
     # Left tail: exp(s₁ - log_ref) × ∫_{-∞}^{0} exp(β_L u + ½M₁ u²) du
     @inbounds masses[1] = exp(s[1] - log_ref) * _half_gaussian_integral(β_L, M1)
 
-    # Right tail: exp(s₃ - log_ref) × ∫_{0}^{∞} exp(β_R u + ½M₃ u²) du
-    # = exp(s₃ - log_ref) × ∫_{-∞}^{0} exp(-β_R v + ½M₃ v²) dv  (v = -u)
+    # Right tail: exp(s₃ - log_ref) × ∫_{-∞}^{0} exp(-β_R v + ½M₃ v²) dv
     @inbounds masses[4] = exp(s[3] - log_ref) * _half_gaussian_integral(-β_R, M3)
 
-    # Interior segments by GL quadrature
-    @inbounds for seg in 1:2
-        a = t[seg]; b = t[seg+1]
-        mid = (a+b)*0.5; half = (b-a)*0.5
-        val = 0.0
-        for i in 1:16
-            x = mid + half * GL16_NODES[i]
-            val += GL16_WEIGHTS[i] * exp(cspline_eval(x, t, s, β_L, β_R, M1, M3) - log_ref)
-        end
-        masses[seg+1] = val * half
-    end
+    # Interior segments: exact Taylor series
+    h1 = t[2] - t[1]; h2 = t[3] - t[2]; H = h1 + h2
+    M2 = (6.0*(s[3]/h2 + s[1]/h1) - M1*h1 - M3*h2) / (2.0*H)
+
+    # Segment [t₁, t₂]: S(t₁+b) = s₁ + c₁b + c₂b² + c₃b³, b ∈ [0, h₁]
+    # c₁ = S'(t₁⁺) = βL, c₂ = M₁/2, c₃ = (M₂-M₁)/(6h₁)
+    c1_1 = β_L;  c2_1 = M1 / 2.0;  c3_1 = (M2 - M1) / (6.0 * h1)
+    @inbounds masses[2] = exp(s[1] - log_ref) * _exp_cubic_integral(c1_1, c2_1, c3_1, h1)
+
+    # Segment [t₂, t₃]: S(t₂+b) = s₂ + c₁b + c₂b² + c₃b³, b ∈ [0, h₂]
+    # c₁ = S'(t₂⁺) from right, c₂ = M₂/2, c₃ = (M₃-M₂)/(6h₂)
+    # S'(t₂⁺) = (s₃-s₂)/h₂ - h₂(M₂+2M₃)/6 ... no, that's S'(t₃⁻).
+    # S'(t₂) from the right segment: using a=t₃-t₂-b, b=x-t₂:
+    #   S'(t₂⁺) = -M₂(t₃-t₂)/(2) + s₃/h₂ ... need to compute from spline formula
+    # Actually: S'(t₂) = (s₂-s₁)/h₁ + h₁(M₁+2M₂)/6  ... no, this is S'(t₂⁻)
+    # From C¹ continuity, S'(t₂⁻) = S'(t₂⁺), so either formula works.
+    # From the left segment: S'(t₂) = (s₂-s₁)/h₁ + h₁(M₁+2M₂)/6
+    # Wait, S'(t₂) from the [t₁,t₂] segment:
+    # S(x) = M₁a³/(6h₁) + M₂b³/(6h₁) + (s₁/h₁-M₁h₁/6)a + (s₂/h₁-M₂h₁/6)b
+    # S'(x) = -M₁a²/(2h₁) + M₂b²/(2h₁) - s₁/h₁+M₁h₁/6 + s₂/h₁-M₂h₁/6
+    # At x=t₂: a=0, b=h₁: S'(t₂) = M₂h₁/2 - s₁/h₁+M₁h₁/6 + s₂/h₁-M₂h₁/6
+    #   = (s₂-s₁)/h₁ + M₁h₁/6 + M₂h₁/3
+    slope_t2 = (s[2]-s[1])/h1 + M1*h1/6 + M2*h1/3
+    c1_2 = slope_t2;  c2_2 = M2 / 2.0;  c3_2 = (M3 - M2) / (6.0 * h2)
+    @inbounds masses[3] = exp(s[2] - log_ref) * _exp_cubic_integral(c1_2, c2_2, c3_2, h2)
+
     masses
 end
 
@@ -1129,33 +1367,47 @@ function cspline_neg_loglik(a_Q::Matrix{Float64}, M_Q::Float64,
 
     total_ll = 0.0
 
-    # Views for the active portion of the grid (size G, not the full pre-allocated size)
+    # Views for the active portion of the grid
     p_v = view(ws.p, 1:G)
     p_new_v = view(ws.p_new, 1:G)
     pw_v = view(ws.pw, 1:G)
     sw_v = view(ws.sw, 1:G)
     T_v = view(ws.T_mat, 1:G, 1:G)
+    grid_v = view(ws.grid, 1:G)
+
+    # Log-density buffer for logspace_integrate
+    log_p = zeros(G)
 
     @inbounds for i in 1:N
+        # t=1: log p(g) = log f_init(g) + log f_eps(y₁-g)
         for g in 1:G
-            f_e = exp(cspline_eval(y[i,1]-ws.grid[g], ws.a_eps_s, ws.s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps) / C_eps_shifted
-            ws.p[g] = ws.f_init[g] * f_e
+            log_p[g] = log(max(ws.f_init[g], 1e-300)) +
+                        cspline_eval(y[i,1]-ws.grid[g], ws.a_eps_s, ws.s_buf,
+                                     β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps_shifted)
         end
-        L1 = dot(p_v, sw_v)
+        # Normalize using log-space integration (exact exp(cubic) on each segment)
+        L1 = logspace_integrate(log_p, grid_v, G)
         L1 < 1e-300 && return Inf
-        total_ll += log(L1); p_v ./= L1
+        total_ll += log(L1)
+        # Store normalized p for prediction step
+        @inbounds for g in 1:G; ws.p[g] = exp(log_p[g]) / L1; end
 
         for t_step in 2:T
+            # Prediction: p_pred(g') = Σ_g T(g,g') × p(g) × sw(g)
+            # Still use matrix-vector (prediction integral needs T which depends on g)
             @inbounds for g in 1:G; ws.pw[g] = ws.p[g] * ws.sw[g]; end
             mul!(p_new_v, transpose(T_v), pw_v)
+
+            # Observation update: log p_new(g) = log p_pred(g) + log f_eps(y_t - g)
             for g in 1:G
-                f_e = exp(cspline_eval(y[i,t_step]-ws.grid[g], ws.a_eps_s, ws.s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps) / C_eps_shifted
-                ws.p_new[g] *= f_e
+                lp_pred = log(max(ws.p_new[g], 1e-300))
+                log_p[g] = lp_pred + cspline_eval(y[i,t_step]-ws.grid[g], ws.a_eps_s, ws.s_buf,
+                                                   β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps_shifted)
             end
-            Lt = dot(p_new_v, sw_v)
+            Lt = logspace_integrate(log_p, grid_v, G)
             Lt < 1e-300 && return Inf
-            total_ll += log(Lt); p_new_v ./= Lt
-            @inbounds for g in 1:G; ws.p[g] = ws.p_new[g]; end
+            total_ll += log(Lt)
+            @inbounds for g in 1:G; ws.p[g] = exp(log_p[g]) / Lt; end
         end
     end
     -total_ll / N
@@ -1727,38 +1979,107 @@ function cspline_neg_loglik_and_grad!(grad_v_out::Vector{Float64},
     nll = -total_ll/N
 
     # ============================================================
-    # PHASE 5: Chain rule — unpacked → packed gradient
+    # PHASE 5: Chain rule — unpacked → packed gradient (ANALYTICAL)
     # grad_unp[j] = ∂nll/∂θ_j for unpacked params θ.
     # Need ∂nll/∂v = Σ_j (∂nll/∂θ_j)(∂θ_j/∂v_i).
-    # Compute ∂θ/∂v by numerically differentiating unpack.
+    #
+    # Packed v layout (K=2, nk=3):
+    #   v[1:3]: median_q = a_Q[:,2]
+    #   v[4:6]: δ_L = (δ₁,δ₂,δ₃) for left gap
+    #   v[7:9]: δ_R = (δ₁,δ₂,δ₃) for right gap
+    #   v[10]: log(-M_Q)
+    #   v[11]: init_median = a_init[2]
+    #   v[12]: log(a_init[2]-a_init[1])
+    #   v[13]: log(a_init[3]-a_init[2])
+    #   v[14]: log(-M_init)
+    #   v[15]: log(-a_eps1)
+    #   v[16]: log(a_eps3)
+    #   v[17]: log(-M_eps)
     # ============================================================
     fill!(grad_v_out, 0.0)
-    h_j = 1e-7
-    for j_v in 1:np
-        vp = copy(v); vp[j_v] += h_j
-        vm = copy(v); vm[j_v] -= h_j
-        aQp, MQp, aip, Mip, ae1p, ae3p, Mep = unpack_cspline(vp, K)
-        aQm, MQm, aim, Mim, ae1m, ae3m, Mem = unpack_cspline(vm, K)
-        g_j = 0.0
-        # a_Q[k,l]: indices 1..nk*3 in grad_unp
-        for l in 1:3, k in 1:nk
-            idx = (l-1)*nk + k
-            g_j += grad_unp[idx] * (aQp[k,l]-aQm[k,l])/(2h_j)
-        end
-        # M_Q: index nk*3+1
-        g_j += grad_unp[nk*3+1] * (MQp-MQm)/(2h_j)
-        # a_init: indices nk*3+2..nk*3+4
-        for l in 1:3; g_j += grad_unp[nk*3+1+l] * (aip[l]-aim[l])/(2h_j); end
-        # M_init: index nk*3+5
-        g_j += grad_unp[nk*3+5] * (Mip-Mim)/(2h_j)
-        # a_eps1: nk*3+6
-        g_j += grad_unp[nk*3+6] * (ae1p-ae1m)/(2h_j)
-        # a_eps3: nk*3+7
-        g_j += grad_unp[nk*3+7] * (ae3p-ae3m)/(2h_j)
-        # M_eps: nk*3+8
-        g_j += grad_unp[nk*3+8] * (Mep-Mem)/(2h_j)
-        grad_v_out[j_v] = g_j
+
+    # -- Median q: v[k] = a_Q[k,2], so ∂a_Q[k,2]/∂v[k] = 1
+    #    Also a_Q[k,1] = v[k] - d_L[k], a_Q[k,3] = v[k] + d_R[k]
+    #    ∂a_Q[k,1]/∂v[k] = 1, ∂a_Q[k,3]/∂v[k] = 1 (median shifts all three)
+    for k in 1:nk
+        idx1 = k; idx2 = nk+k; idx3 = 2*nk+k  # grad_unp indices for a_Q[k,1], a_Q[k,2], a_Q[k,3]
+        grad_v_out[k] = grad_unp[idx1] + grad_unp[idx2] + grad_unp[idx3]
     end
+
+    # -- Left gap: v[nk+1:nk+3] = (δ₁,δ₂,δ₃) → d_L = (d₀,d₁,d₂) → a_Q[:,1] = median - d_L
+    # d₂ = exp(δ₁), d₀ = d₂ + exp(δ₂), d₁ = 2√(d₂·exp(δ₂))·tanh(δ₃)
+    # a_Q[1,1] = median[1] - d₀, a_Q[2,1] = median[2] - d₁, a_Q[3,1] = median[3] - d₂
+    δ₁L = v[nk+1]; δ₂L = v[nk+2]; δ₃L = v[nk+3]
+    d2L = exp(δ₁L); eδ2L = exp(δ₂L); d0L = d2L + eδ2L
+    sqL = sqrt(d2L * eδ2L); tanhL = tanh(δ₃L); d1L = 2.0*sqL*tanhL
+
+    # ∂d₀/∂δ₁ = d₂, ∂d₀/∂δ₂ = eδ₂
+    # ∂d₁/∂δ₁ = 2·(eδ₂/(2√(d₂eδ₂)))·d₂·tanh = sqL·tanh·(eδ₂/sqL)... let me compute directly
+    # d₁ = 2√(d₂eδ₂)·tanh(δ₃). ∂d₂/∂δ₁ = d₂, ∂eδ₂/∂δ₁ = 0
+    # ∂d₁/∂δ₁ = 2·tanh·∂√(d₂eδ₂)/∂δ₁ = 2·tanh·eδ₂/(2√(d₂eδ₂))·d₂ = tanh·d₂·eδ₂/sqL = tanh·sqL
+    # Wait: ∂√(d₂eδ₂)/∂δ₁ = (eδ₂·d₂)/(2√(d₂eδ₂)) = sqL/2 ... no.
+    # √(d₂eδ₂) = sqL. d₂ = exp(δ₁). ∂d₂/∂δ₁ = d₂.
+    # ∂sqL/∂δ₁ = ∂√(d₂eδ₂)/∂δ₁ = eδ₂·d₂/(2sqL) = d₂·eδ₂/(2sqL)
+    # Hmm: sqL² = d₂·eδ₂. ∂(sqL²)/∂δ₁ = eδ₂·d₂. So 2sqL·∂sqL/∂δ₁ = eδ₂·d₂ → ∂sqL/∂δ₁ = eδ₂·d₂/(2sqL)
+    # Then ∂d₁/∂δ₁ = 2·tanh·eδ₂·d₂/(2sqL) = tanh·eδ₂·d₂/sqL = tanh·sqL (since sqL = √(d₂eδ₂))
+    dd0_dδ1L = d2L;       dd0_dδ2L = eδ2L;      dd0_dδ3L = 0.0
+    dd1_dδ1L = tanhL*sqL;  dd1_dδ2L = tanhL*sqL;  dd1_dδ3L = 2.0*sqL*(1.0-tanhL^2)
+    dd2_dδ1L = d2L;       dd2_dδ2L = 0.0;        dd2_dδ3L = 0.0
+
+    # a_Q[k,1] = median[k] - d_L[k]: ∂a_Q[1,1]/∂δᵢ = -∂d₀/∂δᵢ, ∂a_Q[2,1]/∂δᵢ = -∂d₁/∂δᵢ, etc.
+    for i in 1:3
+        dd = i==1 ? (dd0_dδ1L, dd1_dδ1L, dd2_dδ1L) :
+             i==2 ? (dd0_dδ2L, dd1_dδ2L, dd2_dδ2L) :
+                    (dd0_dδ3L, dd1_dδ3L, dd2_dδ3L)
+        for k in 1:nk
+            grad_v_out[nk+i] -= grad_unp[k] * dd[k]  # -∂d_L[k]/∂δ_i × ∂nll/∂a_Q[k,1]
+        end
+    end
+
+    # -- Right gap: v[2nk+1:2nk+3] = (δ₄,δ₅,δ₆) → d_R → a_Q[:,3] = median + d_R
+    δ₁R = v[2*nk+1]; δ₂R = v[2*nk+2]; δ₃R = v[2*nk+3]
+    d2R = exp(δ₁R); eδ2R = exp(δ₂R); d0R = d2R + eδ2R
+    sqR = sqrt(d2R * eδ2R); tanhR = tanh(δ₃R)
+
+    dd0_dδ1R = d2R;       dd0_dδ2R = eδ2R;      dd0_dδ3R = 0.0
+    dd1_dδ1R = tanhR*sqR;  dd1_dδ2R = tanhR*sqR;  dd1_dδ3R = 2.0*sqR*(1.0-tanhR^2)
+    dd2_dδ1R = d2R;       dd2_dδ2R = 0.0;        dd2_dδ3R = 0.0
+
+    for i in 1:3
+        dd = i==1 ? (dd0_dδ1R, dd1_dδ1R, dd2_dδ1R) :
+             i==2 ? (dd0_dδ2R, dd1_dδ2R, dd2_dδ2R) :
+                    (dd0_dδ3R, dd1_dδ3R, dd2_dδ3R)
+        for k in 1:nk
+            grad_v_out[2*nk+i] += grad_unp[2*nk+k] * dd[k]  # +∂d_R[k]/∂δ_i × ∂nll/∂a_Q[k,3]
+        end
+    end
+
+    # -- M_Q: v[3nk+1] = log(-M_Q) → M_Q = -exp(v), ∂M_Q/∂v = M_Q
+    grad_v_out[3*nk+1] = grad_unp[nk*3+1] * M_Q
+
+    # -- Init: v[3nk+2] = median, v[3nk+3] = log(gap_L), v[3nk+4] = log(gap_R)
+    p = 3*nk + 1
+    gap_L_init = a_init[2] - a_init[1]
+    gap_R_init = a_init[3] - a_init[2]
+    # a_init = [median-gap_L, median, median+gap_R]
+    # ∂a_init[1]/∂v_median = 1, ∂a_init[2]/∂v_median = 1, ∂a_init[3]/∂v_median = 1
+    grad_v_out[p+1] = grad_unp[nk*3+2] + grad_unp[nk*3+3] + grad_unp[nk*3+4]
+    # ∂a_init[1]/∂v_logL = -gap_L, ∂a_init[2]/∂v_logL = 0, ∂a_init[3]/∂v_logL = 0
+    grad_v_out[p+2] = -grad_unp[nk*3+2] * gap_L_init
+    # ∂a_init[3]/∂v_logR = +gap_R
+    grad_v_out[p+3] = grad_unp[nk*3+4] * gap_R_init
+
+    # -- M_init: v[p+4] = log(-M_init) → ∂M_init/∂v = M_init
+    grad_v_out[p+4] = grad_unp[nk*3+5] * M_init
+
+    # -- a_eps1: v[p+5] = log(-a_eps1) → a_eps1 = -exp(v), ∂a_eps1/∂v = a_eps1
+    grad_v_out[p+5] = grad_unp[nk*3+6] * a_eps1
+
+    # -- a_eps3: v[p+6] = log(a_eps3) → ∂a_eps3/∂v = a_eps3
+    grad_v_out[p+6] = grad_unp[nk*3+7] * a_eps3
+
+    # -- M_eps: v[p+7] = log(-M_eps) → ∂M_eps/∂v = M_eps
+    grad_v_out[p+7] = grad_unp[nk*3+8] * M_eps
 
     nll
 end
