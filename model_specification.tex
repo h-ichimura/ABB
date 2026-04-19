@@ -1,0 +1,119 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,geometry}
+\geometry{margin=1in}
+\title{ABB Three-Period Model: Specification for Monte Carlo}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+
+\section{Model}
+
+\textbf{Observation equation:}
+\begin{equation}
+y_{it} = \eta_{it} + \varepsilon_{it}, \quad i = 1,\ldots,N, \quad t = 1, 2, 3
+\end{equation}
+
+\textbf{Initial persistent component:} $\eta_{i1} \sim F_{\eta_1}$
+
+\textbf{Transition:}
+\begin{equation}
+\eta_{it} = Q(\eta_{i,t-1},\, u_{it}), \qquad u_{it} \sim \mathrm{Uniform}(0,1), \quad t = 2, 3
+\end{equation}
+
+\textbf{Transitory shock:} $\varepsilon_{it} \sim F_\varepsilon$, iid across $i$ and $t$, independent of $\eta$.
+
+\section{Distribution Specification}
+
+All three distributions ($F_{\eta_1}$, the conditional $\eta_t \mid \eta_{t-1}$, and $F_\varepsilon$) use the same piecewise-uniform + exponential-tail form from ABB (2017, Econometrica).
+
+\subsection{Transition quantile function}
+
+On a grid $\tau_1 < \cdots < \tau_L$ (we use $L=3$, $\tau = (0.25, 0.50, 0.75)$):
+\begin{equation}
+q_\ell(\eta_{t-1}) \;\equiv\; Q(\eta_{t-1},\, \tau_\ell) \;=\; \sum_{k=0}^{K} a_{k\ell}^Q \;\mathrm{He}_k\!\Bigl(\frac{\eta_{t-1}}{\sigma_y}\Bigr), \quad \ell = 1,\ldots,L
+\end{equation}
+where $\mathrm{He}_k$ are probabilist's Hermite polynomials ($\mathrm{He}_0(x)=1$, $\mathrm{He}_1(x)=x$, $\mathrm{He}_2(x)=x^2-1$). We use $K=2$, $\sigma_y = 1$.
+
+Between grid points, $Q$ is \textbf{linear in $\tau$}:
+\begin{equation}
+Q(\eta_{t-1}, \tau) = q_\ell(\eta_{t-1}) + \frac{q_{\ell+1}(\eta_{t-1}) - q_\ell(\eta_{t-1})}{\tau_{\ell+1} - \tau_\ell}\,(\tau - \tau_\ell), \quad \tau \in [\tau_\ell,\, \tau_{\ell+1}]
+\end{equation}
+
+On the tails (footnote 24, p.709 of ABB):
+\begin{align}
+Q(\eta_{t-1}, \tau) &= q_1(\eta_{t-1}) + \frac{1}{\lambda^Q}\log\frac{\tau}{\tau_1}, \quad \tau \in (0,\, \tau_1) \\[6pt]
+Q(\eta_{t-1}, \tau) &= q_L(\eta_{t-1}) - \frac{1}{\lambda_+^Q}\log\frac{1-\tau}{1-\tau_L}, \quad \tau \in [\tau_L,\, 1)
+\end{align}
+
+\subsection{Implied density}
+
+The density of $\eta_t$ given $\eta_{t-1}$ is:
+\begin{equation}
+f(x \mid \eta_{t-1}) = \begin{cases}
+\tau_1 \,\lambda^Q \exp\bigl(\lambda^Q(x - q_1(\eta_{t-1}))\bigr) & \text{if } x \le q_1(\eta_{t-1}) \\[8pt]
+\dfrac{\tau_{\ell+1} - \tau_\ell}{q_{\ell+1}(\eta_{t-1}) - q_\ell(\eta_{t-1})} & \text{if } q_\ell(\eta_{t-1}) < x \le q_{\ell+1}(\eta_{t-1}) \\[8pt]
+(1-\tau_L)\,\lambda_+^Q \exp\bigl(-\lambda_+^Q(x - q_L(\eta_{t-1}))\bigr) & \text{if } x > q_L(\eta_{t-1})
+\end{cases}
+\end{equation}
+
+This is piecewise \textbf{uniform} on each interval $(q_\ell, q_{\ell+1}]$ with \textbf{exponential tails}.
+
+\subsection{Marginal distributions}
+
+$F_{\eta_1}$ and $F_\varepsilon$ use the same form with $K=0$ (no conditioning variable), so the quantile knots are scalars $q_\ell^{\eta_1}$ and $q_\ell^\varepsilon$ with respective tail parameters.
+
+\section{Data generation}
+
+To draw $\eta_t$ given $\eta_{t-1}$:
+\begin{enumerate}
+\item Draw $u \sim \mathrm{Uniform}(0,1)$
+\item Compute quantile knots $q_1(\eta_{t-1}), \ldots, q_L(\eta_{t-1})$ from (3)
+\item If $u < \tau_1$: \quad $\eta_t = q_1(\eta_{t-1}) + \frac{1}{\lambda^Q}\log\frac{u}{\tau_1}$
+\item If $\tau_\ell \le u < \tau_{\ell+1}$: \quad $\eta_t = q_\ell(\eta_{t-1}) + \frac{q_{\ell+1}(\eta_{t-1}) - q_\ell(\eta_{t-1})}{\tau_{\ell+1} - \tau_\ell}(u - \tau_\ell)$
+\item If $u \ge \tau_L$: \quad $\eta_t = q_L(\eta_{t-1}) - \frac{1}{\lambda_+^Q}\log\frac{1-u}{1-\tau_L}$
+\end{enumerate}
+Similarly for $\eta_{i1}$ and $\varepsilon_{it}$ (without the conditioning variable).
+
+\section{True Parameter Values (Linear DGP)}
+
+We approximate an AR(1) with Gaussian innovations:
+\[
+\eta_t = \rho\,\eta_{t-1} + \sigma_v\, v_t, \quad v_t \sim N(0,1)
+\]
+using $\rho = 0.8$, $\sigma_v = 0.5$, $\sigma_\varepsilon = 0.3$, $\sigma_{\eta_1} = 1.0$.
+
+\subsection{Transition parameters}
+
+\begin{center}
+\begin{tabular}{l|ccc}
+& $\ell=1$ ($\tau=0.25$) & $\ell=2$ ($\tau=0.50$) & $\ell=3$ ($\tau=0.75$) \\
+\hline
+$a_{0\ell}^Q$ (intercept) & $\sigma_v \Phi^{-1}(0.25) = -0.337$ & $0$ & $0.337$ \\
+$a_{1\ell}^Q$ (slope) & $0.8$ & $0.8$ & $0.8$ \\
+$a_{2\ell}^Q$ (quadratic) & $0$ & $0$ & $0$
+\end{tabular}
+\end{center}
+\[
+\lambda^Q = \lambda_+^Q = \frac{1}{\sigma_v} = 2.0
+\]
+
+The slope $a_{1\ell}^Q = \rho \cdot \sigma_y = 0.8$ is \textbf{constant across $\ell$} (persistence does not depend on the quantile level). When we report ``persistence'' in the estimation results, we compute $a_{1\ell}^Q / \sigma_y$.
+
+\subsection{Initial $\eta_1$ parameters}
+
+\[
+q_\ell^{\eta_1} = \sigma_{\eta_1}\, \Phi^{-1}(\tau_\ell) = (-0.674,\; 0,\; 0.674), \qquad \lambda = \lambda_+ = 1.0
+\]
+
+\subsection{Transitory $\varepsilon$ parameters}
+
+\[
+q_\ell^\varepsilon = \sigma_\varepsilon\, \Phi^{-1}(\tau_\ell) = (-0.202,\; 0,\; 0.202), \qquad \lambda = \lambda_+ = \frac{1}{\sigma_\varepsilon} = 3.333
+\]
+
+\section{Important Remark}
+
+Although the true parameters are chosen to \emph{approximate} a Gaussian AR(1), the actual DGP is \textbf{not Gaussian}. The data are drawn from the piecewise-uniform density in equation (7), which has flat segments between knots and exponential (not Gaussian) tails. The estimation model is \textbf{correctly specified} for this DGP.
+
+\end{document}

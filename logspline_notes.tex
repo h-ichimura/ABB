@@ -1,0 +1,86 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,geometry}
+\geometry{margin=1in}
+\title{Logspline Density for the ABB Transition Model}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+
+\section{The idea}
+
+ABB model the conditional distribution of $\eta_t \mid \eta_{t-1}$
+via a piecewise-linear quantile function, which implies a
+piecewise-uniform density with jump discontinuities at the
+quantile knots.  These discontinuities make the log-likelihood
+non-smooth in the parameters, complicating MLE.
+
+\medskip\noindent
+\textbf{Alternative:} Model the conditional \emph{log-density}
+directly as a smooth spline (Stone et al.\ 1997).  The density is
+then $f(x) = \exp(s(x)) / C$ where $s(x)$ is a cubic spline and
+$C = \int \exp(s(x))\,dx$ is the normalizing constant.  The density
+is smooth (infinitely differentiable where the spline is), so the
+log-likelihood is a smooth function of the parameters.
+
+\section{Logspline model for the transition}
+
+Given knots $t_1 < t_2 < \cdots < t_K$ and the truncated power basis
+$(x - t_k)_+^3$, the log-density of $\eta_t$ given $\eta_{t-1}$ is:
+\begin{equation}
+\log f(\eta_t \mid \eta_{t-1}) = \beta_0(\eta_{t-1}) + \beta_1(\eta_{t-1})\,\eta_t + \sum_{k=1}^{K} \gamma_k(\eta_{t-1})\,(\eta_t - t_k)_+^3 - \log C(\eta_{t-1})
+\end{equation}
+where the coefficients depend on $\eta_{t-1}$ through the Hermite basis:
+\begin{align}
+\beta_0(\eta_{t-1}) &= \sum_{j=0}^{J} a_{0j}\,\mathrm{He}_j(\eta_{t-1}/\sigma_y) \\
+\beta_1(\eta_{t-1}) &= \sum_{j=0}^{J} a_{1j}\,\mathrm{He}_j(\eta_{t-1}/\sigma_y) \\
+\gamma_k(\eta_{t-1}) &= \sum_{j=0}^{J} a_{(k+1)j}\,\mathrm{He}_j(\eta_{t-1}/\sigma_y)
+\end{align}
+and the normalizing constant is:
+\begin{equation}
+C(\eta_{t-1}) = \int_{-\infty}^{\infty} \exp\Bigl(\beta_0(\eta_{t-1}) + \beta_1(\eta_{t-1})\,x + \sum_{k=1}^{K} \gamma_k(\eta_{t-1})\,(x - t_k)_+^3\Bigr)\,dx
+\end{equation}
+
+\section{Advantages}
+
+\begin{itemize}
+\item The density $f(\eta_t \mid \eta_{t-1})$ is \emph{smooth} ---
+no jump discontinuities.  The log-likelihood is therefore a smooth
+function of the parameters $\{a_{pj}\}$.
+\item Gradient-based optimization (LBFGS, Newton) works directly.
+\item The normalizing constant $C(\eta_{t-1})$ must be computed
+numerically (Gaussian quadrature), but this is standard.
+\item Knot selection can follow the BIC-based addition/deletion
+algorithm of Stone et al.\ (1997), or knots can be fixed at
+quantiles of the data.
+\end{itemize}
+
+\section{Relation to ABB's piecewise-uniform}
+
+ABB's piecewise-uniform density can be viewed as a special case
+where the log-density is piecewise constant (a step function).
+The logspline replaces this with a smooth cubic spline of the
+log-density, using the same knot locations but achieving smoothness.
+
+\medskip\noindent
+Both approaches use the same Hermite basis for
+$\eta_{t-1}$-dependence.  The difference is only in how the
+conditional density of $\eta_t$ is parametrized: quantile knots
+(ABB) vs.\ log-density spline coefficients (logspline).
+
+\section{Implementation plan}
+
+\begin{enumerate}
+\item Fix knots $t_1,\ldots,t_K$ (e.g., at quantiles of the pooled $\eta_t$ draws).
+\item Parameters: $\{a_{pj} : p = 0,\ldots,K+1,\; j = 0,\ldots,J\}$.
+\item For each observation $(\eta_t, \eta_{t-1})$:
+  \begin{itemize}
+  \item Compute $\beta_0, \beta_1, \gamma_1,\ldots,\gamma_K$ from $\eta_{t-1}$.
+  \item Evaluate the log-spline $s(\eta_t) = \beta_0 + \beta_1 \eta_t + \sum_k \gamma_k (\eta_t - t_k)_+^3$.
+  \item Compute $C(\eta_{t-1})$ by numerical integration of $\exp(s(x))$ over $x$.
+  \end{itemize}
+\item Log-likelihood: $\sum_j [s(\eta_{t,j}) - \log C(\eta_{t-1,j})]$.
+\item Optimize by LBFGS (smooth objective).
+\end{enumerate}
+
+\end{document}

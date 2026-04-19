@@ -1,0 +1,31 @@
+# Serialized results
+*.jls
+
+# Logs and HPC output
+hpc/logs/
+hpc/results/
+
+# Data and papers (large files)
+*.zip
+*.pdf
+13795-3_Data_and_Programs/
+polspline/
+
+# Output/log files (reproducible from code)
+*.txt
+*.png
+*.aux
+
+# LaTeX intermediates (keep .tex source)
+*.log
+*.lyx
+
+# IDE/editor
+.vscode/
+.claude/
+*.swp
+*~
+.DS_Store
+
+# Julia artifacts
+Manifest.toml

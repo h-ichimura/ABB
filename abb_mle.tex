@@ -1,0 +1,272 @@
+\documentclass[12pt]{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{natbib}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+
+\title{Maximum Likelihood (ML) Estimation of the Arellano--Blundell--Bonhomme (ABB) Model}
+\author{Hidehiko Ichimura \and Risheng Xu}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We consider maximum likelihood (ML) estimation of the \citet{abb2017} model of nonlinear earnings dynamics and show that it is numerically feasible.
+However, the implied density in the ABB model is piecewise uniform and therefore not smooth, which complicates standard likelihood-based inference.
+We propose a log-spline extension of the model that yields smooth conditional densities while retaining the flexibility of the quantile-based parameterization.
+\end{abstract}
+
+\section{Introduction}
+
+\citet{abb2017} develop a flexible model of nonlinear earnings dynamics in which the conditional quantile function of earnings given lagged earnings is approximated by a Hermite polynomial expansion. The model's transition density is piecewise uniform between estimated quantile knots with exponential tails. Estimation proceeds by an EM-type algorithm in which the M-step uses quantile regression (QR) at each level $\tau_{\ell}$ independently, and the E-step draws latent earnings by Metropolis--Hastings (MH).
+
+While the ABB estimator is convenient, it has two limitations. First, QR estimates each conditional quantile separately and does not impose the structural restriction that conditional quantiles must be monotone in~$\tau$: at any value of lagged earnings, we must have $Q_{1}(\eta) \leq Q_{2}(\eta) \leq \cdots \leq Q_{L}(\eta)$. Second, QR uses only quantile conditions rather than the full density, so it is asymptotically less efficient than the maximum likelihood estimator (MLE) under correct specification. In this note we consider ML estimation of the ABB model, with the non-crossing restriction imposed explicitly.
+
+The central numerical difficulty is that the ABB log-likelihood is not a smooth function of the parameters. Because the density is piecewise constant between knots, small changes in the parameters can move individual observations across segment boundaries, producing kinks in the log-likelihood as a function of the parameters. Standard gradient-based optimizers (L-BFGS, interior-point methods) and symbolic modeling frameworks (JuMP/Ipopt) assume a $C^{2}$ objective and therefore do not apply directly. We characterize the structure of the ABB objective in Section~\ref{sec:shape} and describe numerical methods suited to it in Section~\ref{sec:mle_abb}.
+
+As an alternative, Section~\ref{sec:mle_logspline} develops a log-spline extension of the ABB model in which the conditional density is smooth of class $C^{2}$ by construction. The log-spline specification retains the flexibility of the ABB quantile-based parameterization but supports standard gradient-based estimation and likelihood-based inference.
+
+\section{Shape of the Objective Functions}
+\label{sec:shape}
+
+\subsection{The ABB Model}
+
+Let $y_{it}$ denote the observed (log) earnings of individual~$i$ in period~$t$, for $i=1,\dots,N$ and $t=1,\dots,T$. The ABB model decomposes earnings into a latent permanent component $\eta_{it}$ and a transitory shock $\varepsilon_{it}$:
+\begin{align}
+y_{it} &= \eta_{it} + \varepsilon_{it}, \\
+\eta_{i1} &\sim F_{\mathrm{init}}(\cdot), \\
+\eta_{it} \mid \eta_{i,t-1} &\sim F_{\mathrm{trans}}(\cdot \mid \eta_{i,t-1}), \quad t \geq 2, \\
+\varepsilon_{it} &\stackrel{iid}{\sim} F_{\varepsilon}(\cdot).
+\end{align}
+The conditional quantiles of the transition are parameterized via Hermite polynomials. Let $\tau_{1} < \tau_{2} < \cdots < \tau_{L}$ denote the quantile levels (with $L=3$ and $\tau = (0.25, 0.50, 0.75)$ in our baseline), and let $K$ denote the order of the Hermite expansion (we use $K=2$). The $\ell$-th conditional quantile of $\eta_{it}$ given $\eta_{i,t-1}$ is
+\begin{equation}
+Q_{\ell}(\eta; a) \;=\; \sum_{k=0}^{K} a_{k\ell}\, \mathrm{He}_{k}\!\left(\frac{\eta}{\sigma_{y}}\right),
+\label{eq:quantile}
+\end{equation}
+where $\mathrm{He}_{k}$ denotes the Hermite polynomial of order~$k$. Stacking into the basis vector
+$h(\eta) = (1,\,\eta/\sigma_{y},\,\mathrm{He}_{2}(\eta/\sigma_{y}))^{\top}$,
+we write $Q_{\ell}(\eta; a) = h(\eta)^{\top} a_{\cdot\ell}$ where $a_{\cdot\ell}$ is the $\ell$-th column of $a \in \mathbb{R}^{(K+1)\times L}$.
+
+Given the $L$ conditional quantile values $Q_{1}(\eta) < \cdots < Q_{L}(\eta)$, the transition density is piecewise uniform between consecutive quantiles with exponential tails:
+\begin{equation}
+f_{\mathrm{trans}}(x \mid \eta) \;=\;
+\begin{cases}
+\tau_{1}\,\lambda_{-} \exp\!\left[\lambda_{-}(x - Q_{1}(\eta))\right], & x \leq Q_{1}(\eta),\\[4pt]
+\dfrac{\tau_{\ell+1} - \tau_{\ell}}{Q_{\ell+1}(\eta) - Q_{\ell}(\eta)}, & Q_{\ell}(\eta) < x \leq Q_{\ell+1}(\eta),\\[8pt]
+(1 - \tau_{L})\,\lambda_{+} \exp\!\left[-\lambda_{+}(x - Q_{L}(\eta))\right], & x > Q_{L}(\eta).
+\end{cases}
+\label{eq:pwdens}
+\end{equation}
+The initial distribution $F_{\mathrm{init}}$ and the transitory-shock distribution $F_{\varepsilon}$ are parameterized analogously with their own Hermite coefficients and tail rates.
+
+\subsection{The Non-crossing Restriction}
+
+A valid density requires $Q_{\ell}(\eta) \leq Q_{\ell+1}(\eta)$ for all $\eta$ and all $\ell$. In the Hermite parameterization~\eqref{eq:quantile}, this is
+\begin{equation}
+\bigl(a_{\cdot,\ell+1} - a_{\cdot,\ell}\bigr)^{\top} h(\eta) \;\geq\; 0
+\quad \text{for all } \eta \in \mathbb{R},\; \ell = 1,\dots,L-1.
+\label{eq:noncross}
+\end{equation}
+When data are generated from the true DGP, \eqref{eq:noncross} holds automatically for all $\eta$. However, in the course of numerical optimization, the current parameter iterate $a$ may violate~\eqref{eq:noncross} for some $\eta$, and the density~\eqref{eq:pwdens} becomes ill-defined in that region. ML estimation must therefore impose~\eqref{eq:noncross} during optimization; QR does not.
+
+At observed values $\eta_{t-1,j}$ ($j = 1, \dots, n_{\mathrm{obs}}$), \eqref{eq:noncross} becomes a collection of $n_{\mathrm{obs}} \times (L-1)$ linear inequalities in the parameter vector $\mathrm{vec}(a)$:
+\[
+\sum_{k=0}^{K} h_{k}(\eta_{t-1,j})\,\bigl(a_{k,\ell+1} - a_{k,\ell}\bigr) \;\geq\; 0,
+\quad j = 1,\dots,n_{\mathrm{obs}},\; \ell = 1,\dots,L-1.
+\]
+Collectively these inequalities define a convex polyhedron in $\mathbb{R}^{(K+1)L}$.
+
+\subsection{Non-smoothness of the Log-likelihood}
+
+Consider the contribution of a single transition pair $(\eta_{t,j}, \eta_{t-1,j})$ to the complete-data log-likelihood. Holding $\eta_{t-1,j}$ fixed and varying $a$, the log-density takes three functional forms depending on the segment into which $\eta_{t,j}$ falls:
+\begin{enumerate}
+\item \emph{Middle segment $\ell$}, if $Q_{\ell}(\eta_{t-1,j}) < \eta_{t,j} \leq Q_{\ell+1}(\eta_{t-1,j})$:
+\[
+\log f \;=\; \log(\tau_{\ell+1} - \tau_{\ell}) \;-\; \log\!\bigl(h(\eta_{t-1,j})^{\top}(a_{\cdot,\ell+1} - a_{\cdot,\ell})\bigr).
+\]
+This is smooth in $a$ as long as the segment assignment is fixed.
+\item \emph{Left tail}, if $\eta_{t,j} \leq Q_{1}(\eta_{t-1,j})$:
+\[
+\log f \;=\; \log(\tau_{1}\lambda_{-}) \;+\; \lambda_{-}\bigl(\eta_{t,j} - h(\eta_{t-1,j})^{\top} a_{\cdot,1}\bigr).
+\]
+Also smooth (linear) in $a$.
+\item \emph{Right tail}, if $\eta_{t,j} > Q_{L}(\eta_{t-1,j})$: similar expression, linear in $a_{\cdot,L}$.
+\end{enumerate}
+As $a$ varies, an observation can move between segments; at the boundary of two segments the log-density values agree but the gradients generally do not. The full sample log-likelihood $\sum_{j} \log f_{\mathrm{trans}}(\eta_{t,j} \mid \eta_{t-1,j}; a)$ is therefore piecewise smooth, with kinks occurring at parameter values $a$ such that $\eta_{t,j} = Q_{\ell}(\eta_{t-1,j})$ for some $j$ and $\ell$. These kinks lie on hyperplanes in the parameter space and are generically dense---every small neighborhood of any $a$ contains some kinks.
+
+Figure~\ref{fig:profiles} illustrates the relationship between the two objective functions by plotting the QR check-loss and the negative complete-data log-likelihood ($-$CDLL) as functions of the slope parameter $a_{1,\ell}$, holding all other parameters at truth. Both objectives are minimized at (or very near) the true value for all three quantile levels, confirming correct specification. However, the $-$CDLL has sharper curvature near its minimum, reflecting the additional density information it uses: the $-$CDLL penalizes not just the quantile location (as QR does) but also the gap between consecutive quantiles. This sharper curvature implies that the MLE has a smaller asymptotic variance than the QR estimator under correct specification.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{profile_qr_vs_cdll_slopes.png}
+\caption{Profile of the QR check-loss (solid blue) and the negative complete-data log-likelihood (dashed red) over the slope parameter at each quantile level, with all other parameters at truth. Both are normalized to have minimum~$=0$ and maximum~$=1$ for visual comparison. The vertical dotted line marks the true value $a_{1,\ell} = 0.8$. Both objectives are minimized at the truth; the $-$CDLL has sharper curvature, reflecting higher Fisher information.}
+\label{fig:profiles}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{profile_qr_vs_cdll_intercepts.png}
+\caption{Same as Figure~\ref{fig:profiles} but for the intercept parameters $a_{0,\ell}$.}
+\label{fig:profiles_intcpt}
+\end{figure}
+
+This piecewise structure has important consequences for numerical optimization:
+\begin{itemize}
+\item \textbf{Gradient-based solvers (L-BFGS, BFGS) perform poorly.} A numerically computed gradient near a kink is unreliable: finite differences straddle segment boundaries, and automatic differentiation returns one of the two one-sided gradients essentially at random. In our experiments, L-BFGS applied directly to~\eqref{eq:mleobj} makes little progress from a QR warm start.
+\item \textbf{Symbolic solvers (JuMP/Ipopt) require a $C^{2}$ objective} and cannot be used on~\eqref{eq:mleobj} even when linear constraints are imposed. One could fix the segment assignments at a warm start and treat the resulting smooth problem; but with fixed segments the objective is unbounded unless additional bound constraints are imposed, and the result depends on the initial assignments.
+\item \textbf{Brent's one-dimensional search is well suited to piecewise-smooth objectives.} Coordinate descent with 1D Brent searches (as in our Section~\ref{sec:mle_abb}) handles kinks gracefully by bracketing and bisecting without relying on gradient information.
+\item \textbf{Nelder--Mead is derivative-free} and also handles piecewise-smooth objectives, but in our experiments is substantially slower and sometimes unstable when restarted from near-kink configurations.
+\end{itemize}
+
+\section{MLE of the ABB Model}
+\label{sec:mle_abb}
+
+\subsection{The EM Framework and Monte Carlo E-step}
+
+Because $\eta$ is unobserved, the observed-data log-likelihood requires integration over~$\eta$:
+\[
+L(\theta; y) \;=\; \prod_{i=1}^{N} \int p(y_{i}, \eta_{i}; \theta)\, d\eta_{i}.
+\]
+We estimate $\theta$ by an EM algorithm: given $\theta^{(s)}$, the E-step computes the expected complete-data log-likelihood
+\[
+Q(\theta;\theta^{(s)}) \;=\; \mathbb{E}\!\left[\log p(y, \eta; \theta)\,\big|\, y, \theta^{(s)}\right],
+\]
+and the M-step maximizes $Q$. Because the posterior $p(\eta \mid y, \theta^{(s)})$ is analytically intractable under~\eqref{eq:pwdens}, we follow \citet{abb2017} and implement a Monte Carlo E-step: at iteration~$s$, for each individual~$i$, draw $M$ samples $\eta^{(m)}_{i} \sim p(\eta_{i} \mid y_{i}, \theta^{(s)})$ by Metropolis--Hastings with a random-walk proposal. The M-step then maximizes
+\begin{equation}
+\widehat{Q}(\theta;\theta^{(s)}) \;=\; \frac{1}{M} \sum_{m=1}^{M} \sum_{i=1}^{N} \log p(y_{i}, \eta^{(m)}_{i}; \theta)
+\label{eq:mcem}
+\end{equation}
+subject to the non-crossing restriction~\eqref{eq:noncross}. The final estimator is the ergodic average of~$\theta^{(s)}$ over the last $S/2$ iterations, following standard MCEM practice \citep{weitanner1990}. The complete-data log-likelihood in~\eqref{eq:mcem} decomposes additively across transition pairs, so the M-step for the transition parameters takes the form
+\begin{equation}
+\widehat{a} \;=\; \arg\max_{a\; :\; \eqref{eq:noncross}\text{ holds at observed points}} \;\; \sum_{j} \log f_{\mathrm{trans}}(\eta_{t,j} \mid \eta_{t-1,j}; a, \lambda_{-}, \lambda_{+}),
+\label{eq:mleobj}
+\end{equation}
+where the $\eta_{t,j}$ and $\eta_{t-1,j}$ are stacked across individuals, time periods $t=2,\dots,T$, and Monte Carlo draws. The tail rates $\lambda_{-}, \lambda_{+}$ are profiled out via their closed-form conditional MLEs at each evaluation of the objective.
+
+\subsection{QR M-step (ABB)}
+
+ABB's original M-step fits each column of~$a$ separately by quantile regression on the stacked pairs:
+\[
+\widehat{a}_{\cdot,\ell} \;=\; \arg\min_{a}\, \sum_{j}\, \rho_{\tau_{\ell}}\!\left(\eta_{t,j} - h(\eta_{t-1,j})^{\top} a\right),
+\]
+where $\rho_{\tau}(u) = u(\tau - \mathbf{1}\{u < 0\})$ is the check loss. The tail rates are obtained in closed form from the empirical residuals in the two tails. This M-step is fast (a convex program per column) but ignores the density information between quantiles and does not enforce~\eqref{eq:noncross}.
+
+\subsection{ML M-step with Feasible-Interval Coordinate Descent}
+\label{sec:approachA}
+
+We fit the transition parameters $a$ by coordinate descent over the $(K+1) \times L = 9$ entries of~$a$. Cycling $k = 1, \dots, K+1$ and $\ell = 1, \dots, L$, we perform a 1-dimensional Brent search over the current entry $a_{k\ell}$ with the other entries held fixed.
+
+Crucially, given fixed values of the other $(K+1) L - 1$ entries, the non-crossing restriction~\eqref{eq:noncross} at observed points becomes at most $2 n_{\mathrm{obs}}$ linear inequalities in the scalar $a_{k\ell}$ (one from each gap involving column $\ell$). Each such inequality takes the form $\alpha_{j} a_{k\ell} \leq \beta_{j}$ or $\alpha_{j} a_{k\ell} \geq \beta_{j}$ with known $\alpha_{j}, \beta_{j}$. Their intersection is a single interval $[a_{k\ell}^{\min}, a_{k\ell}^{\max}]$, which we compute analytically. We then run Brent on the restricted interval (intersected with a box around the current value for numerical stability).
+
+The tail rates $\lambda_{-}, \lambda_{+}$ are profiled out by their closed-form maximum likelihood estimators at each evaluation of the objective: conditional on $(a, \eta)$, the MLE of $\lambda_{-}$ is $n_{-}/|\sum_{j\in\mathcal{T}_{-}} (\eta_{t,j} - Q_{1}(\eta_{t-1,j}))|$, where $\mathcal{T}_{-}$ is the set of observations in the left tail and $n_{-} = |\mathcal{T}_{-}|$; the right-tail rate $\lambda_{+}$ is analogous.
+
+\subsection{ML M-step with Gap Reparameterization}
+\label{sec:approachB}
+
+An alternative to imposing~\eqref{eq:noncross} as a constraint is to reparameterize so that non-crossing holds by construction. Let $a^{\mathrm{med}}, \delta_{L}, \delta_{U} \in \mathbb{R}^{K+1}$, and define
+\begin{align}
+Q_{2}(\eta) &= h(\eta)^{\top}\, a^{\mathrm{med}}, \label{eq:gap_med}\\
+Q_{1}(\eta) &= Q_{2}(\eta) \;-\; \exp\bigl(h(\eta)^{\top}\, \delta_{L}\bigr), \label{eq:gap_low}\\
+Q_{3}(\eta) &= Q_{2}(\eta) \;+\; \exp\bigl(h(\eta)^{\top}\, \delta_{U}\bigr). \label{eq:gap_up}
+\end{align}
+The exp transforms guarantee $Q_{1}(\eta) < Q_{2}(\eta) < Q_{3}(\eta)$ for every $\eta \in \mathbb{R}$, so~\eqref{eq:noncross} holds globally, not merely at observed points. The parameter count is unchanged. With this reparameterization, ML estimation is unconstrained, and we again perform coordinate descent with 1D Brent searches over the 9 parameters.
+
+The projection back to the original $a$-parameterization (for downstream use in the E-step) proceeds by fitting each $Q_{\ell}(\eta)$ linearly in $h(\eta)$ at the observed $\eta_{t-1,j}$ values. Because $Q_{1}$ and $Q_{3}$ in the gap parameterization are not linear in $h(\eta)$, this projection is an approximation; however, for the purpose of the E-step's MH acceptance ratio, the approximation has been adequate in our experiments.
+
+\subsection{Numerical Performance}
+
+Table~\ref{tab:mstep_obs} reports the performance of ABB's QR, Approach A (feasible-interval coordinate descent), and Approach B (gap reparameterization) on synthetic data with observed~$\eta$. With observed~$\eta$ the MCEM complication does not arise, so this isolates the quality of the M-step itself. Both ML variants dominate QR in complete-data log-likelihood uniformly across ten random seeds, and yield an average slope estimate closer to the truth.
+
+\begin{table}[t]
+\centering
+\caption{M-step performance with observed $\eta$ ($N = 2000$ transition pairs, $K = 2$, $L = 3$, 10 random seeds). True slope: $0.800$. CDLL gain is the average of MLE -- QR complete-data log-likelihoods.}
+\label{tab:mstep_obs}
+\begin{tabular}{lccc}
+\toprule
+Estimator & Avg.\ slope & Avg.\ CDLL gain vs.\ QR & Avg.\ time/call \\
+\midrule
+QR (ABB) & 0.794 & 0 (baseline) & 0.9~s \\
+ML, Approach A (feasible intervals) & 0.796 & $+0.003$ & 4.5~s \\
+ML, Approach B (gap reparameterization) & 0.795 & $+0.003$ & 2.3~s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+With the Monte Carlo E-step and a small number of draws ($M = 50$), ML estimators can exhibit bias in the upper and lower quantile slopes that is not present in QR: the tail quantile estimates become too extreme. This is an MCEM artifact caused by the sensitivity of the ML objective to the shape of the Monte Carlo draws, rather than a defect of the M-step itself. Standard remedies are to increase $M$, to use a warm start from the converged QR estimator, or to use a combined two-stage procedure (QR EM followed by ML EM starting from the QR ergodic average).
+
+\section{MLE of the Log-Spline Model}
+\label{sec:mle_logspline}
+
+The ABB piecewise-uniform density has a desirable property---it is defined by quantile functions, which have direct economic interpretation---but is not smooth. We propose a log-spline extension that preserves the quantile-based intuition but yields a $C^{2}$ density, so that standard likelihood-based inference becomes available.
+
+\subsection{The Log-Spline Density}
+
+Given fixed knot locations $t_{1} < \cdots < t_{K}$, the \emph{log-spline} density of a scalar~$x$ conditional on~$\eta$ takes the form
+\begin{equation}
+\log f(x \mid \eta; \theta) \;=\; \beta_{0}(\eta) + \beta_{1}(\eta)\,x + \sum_{k=1}^{K} \gamma_{k}(\eta)\,(x - t_{k})_{+}^{3} \;-\; \log C(\theta, \eta),
+\label{eq:logspline}
+\end{equation}
+where $(u)_{+} = \max(0, u)$, the coefficients $\beta_{0}, \beta_{1}, \gamma_{1}, \dots, \gamma_{K}$ depend on the conditioning variable~$\eta$ through a Hermite expansion identical to that of the ABB model, and $C(\theta, \eta) = \int \exp\bigl(\beta_{0}(\eta) + \beta_{1}(\eta) x + \sum_{k} \gamma_{k}(\eta)(x - t_{k})_{+}^{3}\bigr)\, dx$ is the normalizing constant \citep{stonehansenetal1997}. The density is $C^{2}$ everywhere, smooth of class $C^{\infty}$ away from the knots, and decays exponentially in the tails provided the outermost $\gamma_{k}$ coefficients are suitably constrained.
+
+\subsection{Relation to the ABB Model}
+
+The log-spline parameterization can be aligned with the ABB model by choosing the log-spline knots to coincide with the ABB quantile knots $Q_{\ell}(\eta)$. Because the ABB knots depend on $\eta$ through the Hermite basis, the log-spline knots will also be functions of~$\eta$; in practice one may fix them at the unconditional sample quantiles of the pooled $\eta$ draws, or allow them to vary by $\eta$ through the Hermite basis. In either case, the log-spline extends the ABB model by replacing the piecewise-constant between-knot density with a cubic-spline log-density.
+
+The parameter count in the log-spline specification is $(K+2)(J+1)$, where $K$ is the number of knots and $J$ is the Hermite order. For $K = 3$ and $J = 2$ this gives $5 \times 3 = 15$ transition parameters, slightly more than the 9 parameters of the ABB specification with $L = 3$ and $J = 2$ but still very manageable.
+
+\subsection{Estimation}
+
+ML estimation of the log-spline model is substantially simpler than ML estimation of the ABB model because~\eqref{eq:logspline} is smooth in the parameters. Specifically:
+
+\begin{enumerate}
+\item \textbf{Closed-form gradients.} The gradient of~\eqref{eq:logspline} with respect to the coefficients of $(\beta_{0}, \beta_{1}, \gamma_{1}, \dots, \gamma_{K})$ is available in closed form, with the only nontrivial ingredient being the expectation $\int \phi_{k}(x) f(x \mid \eta; \theta)\, dx$ of each basis function under the fitted density. These expectations reduce to one-dimensional numerical integrals and can be evaluated efficiently by Gauss--Legendre quadrature.
+\item \textbf{Standard gradient-based optimization.} Given the smoothness of the objective, L-BFGS, BFGS, trust-region Newton, and interior-point Newton methods all apply directly. The M-step of the EM algorithm becomes a smooth unconstrained (or linearly constrained) maximization problem.
+\item \textbf{Convex objective in marginal cases.} For fixed knot locations and fixed conditioning, the log-likelihood as a function of the spline coefficients is concave (this is the classical \emph{log-concavity} result for log-spline MLE). In the conditional density setting the objective is not generally concave, but the local geometry is benign near the MLE.
+\item \textbf{Symbolic modeling and automatic differentiation.} Because~\eqref{eq:logspline} is smooth, it can be encoded in symbolic modeling frameworks such as JuMP and optimized by solvers such as Ipopt, enabling standard constrained nonlinear optimization.
+\item \textbf{Likelihood-based inference.} Wald, likelihood-ratio, and score tests, as well as profile confidence intervals, become straightforward to construct.
+\end{enumerate}
+
+\subsection{Preservation of Quantile Interpretation}
+
+Despite the change in functional form, the log-spline specification preserves the quantile-based interpretation of the ABB model. Given estimated log-spline parameters, one can recover conditional quantile functions $Q_{\tau}(\eta)$ at any level $\tau \in (0, 1)$ by numerical inversion of the conditional CDF, which is inexpensive because the density is smooth and unimodal or bimodal by construction. The main conceptual difference is that the quantile function is implicitly defined through the density rather than directly parameterized, as in ABB.
+
+\section{Conclusion}
+
+We have shown that ML estimation of the \citet{abb2017} nonlinear earnings model is numerically feasible despite the non-smoothness of the piecewise-uniform density. The key tools are (i) coordinate descent with analytically computed feasible intervals for the polyhedral non-crossing constraint, and (ii) a gap reparameterization that enforces non-crossing globally by construction. Both approaches yield ML estimators that, on observed latent states, dominate the ABB QR estimator in complete-data log-likelihood uniformly across random seeds. With Monte Carlo E-steps, ML estimators can exhibit tail-quantile bias that is not present in QR; this is an MCEM artifact to which standard remedies apply.
+
+We have also proposed a log-spline extension of the ABB model that preserves the quantile-based flexibility but yields a $C^{2}$ density, enabling standard gradient-based estimation and inference. In a subsequent version of this paper we will report Monte Carlo and empirical evidence comparing ML estimators based on the ABB and log-spline specifications.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{99}
+\bibitem[Arellano et al.(2017)]{abb2017}
+Arellano, M., Blundell, R., and Bonhomme, S. (2017).
+Earnings and consumption dynamics: A nonlinear panel data framework.
+\textit{Econometrica}, 85(3): 693--734.
+
+\bibitem[Brent(1973)]{brent1973}
+Brent, R. P. (1973).
+\textit{Algorithms for Minimization without Derivatives}.
+Prentice-Hall.
+
+\bibitem[Stone et al.(1997)]{stonehansenetal1997}
+Stone, C. J., Hansen, M. H., Kooperberg, C., and Truong, Y. K. (1997).
+Polynomial splines and their tensor products in extended linear modeling.
+\textit{Annals of Statistics}, 25(4): 1371--1470.
+
+\bibitem[Wei and Tanner(1990)]{weitanner1990}
+Wei, G. C. G., and Tanner, M. A. (1990).
+A Monte Carlo implementation of the EM algorithm and the poor man's data augmentation algorithms.
+\textit{Journal of the American Statistical Association}, 85(411): 699--704.
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,226 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,geometry,bm}
+\geometry{margin=1in}
+\newcommand{\btheta}{\bm{\theta}}
+\newcommand{\He}{\mathrm{He}}
+\title{ABB Stochastic EM with Quantile Regression M-Step:\\
+Three-Period Model with $L=3$}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+
+\section{Model}
+
+\noindent Observation equation ($i=1,\dots,N$, $t=1,2,3$):
+\begin{equation}
+y_{it} = \eta_{it} + \varepsilon_{it}
+\end{equation}
+
+\noindent Persistent component:
+\begin{align}
+\eta_{i1} &\sim F_{\eta_1} \\
+\eta_{it} &= Q(\eta_{i,t-1},\, u_{it}), \qquad u_{it} \sim \mathrm{Uniform}(0,1), \quad t=2,3
+\end{align}
+
+\noindent Transitory component: $\varepsilon_{it} \sim F_\varepsilon$, iid across $i$ and $t$, independent of $\{\eta_{it}\}$.
+
+\medskip\noindent
+All distributions use the piecewise-uniform form on a grid $\tau_1 = 0.25 < \tau_2 = 0.50 < \tau_3 = 0.75$ with exponential tails.
+
+\section{Parametrization}
+
+\subsection{Transition}
+
+The conditional quantile function of $\eta_{it}$ given $\eta_{i,t-1}$ at quantile level $\tau_\ell$ is:
+\begin{equation}\label{eq:Q}
+q_\ell(\eta_{i,t-1}) \;\equiv\; Q(\eta_{i,t-1},\,\tau_\ell) \;=\; \sum_{k=0}^{K} a_{k\ell}^Q \;\He_k\!\Bigl(\frac{\eta_{i,t-1}}{\sigma_y}\Bigr), \qquad \ell = 1,2,3
+\end{equation}
+where $\He_k$ are probabilist's Hermite polynomials ($\He_0(x)=1$, $\He_1(x)=x$, $\He_2(x)=x^2-1$) and $K=2$.
+
+Writing out the three quantile functions explicitly:
+\begin{align}
+q_1(\eta) &= a_{01}^Q + a_{11}^Q \frac{\eta}{\sigma_y} + a_{21}^Q \Bigl(\frac{\eta^2}{\sigma_y^2}-1\Bigr) \\
+q_2(\eta) &= a_{02}^Q + a_{12}^Q \frac{\eta}{\sigma_y} + a_{22}^Q \Bigl(\frac{\eta^2}{\sigma_y^2}-1\Bigr) \\
+q_3(\eta) &= a_{03}^Q + a_{13}^Q \frac{\eta}{\sigma_y} + a_{23}^Q \Bigl(\frac{\eta^2}{\sigma_y^2}-1\Bigr)
+\end{align}
+
+The transition parameters are
+\begin{equation}
+\theta^Q = \{a_{k\ell}^Q : k=0,1,2,\; \ell=1,2,3\} \cup \{\lambda^Q,\, \lambda_+^Q\}
+\end{equation}
+where $\lambda^Q$ and $\lambda_+^Q$ are the left and right exponential tail rates.  This gives $3 \times 3 + 2 = 11$ parameters.
+
+\subsection{Persistence}
+
+The persistence of $\eta_{i,t-1}$ at quantile level $\tau_\ell$ is
+$\partial Q(\eta_{i,t-1}, \tau_\ell) / \partial \eta_{i,t-1}$:
+\begin{equation}
+\rho_\ell(\eta_{i,t-1}) = \frac{a_{1\ell}^Q}{\sigma_y} + \frac{2\, a_{2\ell}^Q\, \eta_{i,t-1}}{\sigma_y^2}
+\end{equation}
+When $a_{2\ell}^Q = 0$, persistence at quantile level $\ell$ is constant: $\rho_\ell = a_{1\ell}^Q / \sigma_y$.  When in addition $a_{1\ell}^Q$ is the same across $\ell$, persistence does not depend on the quantile level of the innovation $u_{it}$.
+
+\subsection{Initial distribution and transitory shock}
+
+Since these are unconditional distributions (no conditioning variable), their quantile functions are characterized by scalars:
+\begin{equation}
+q_\ell^{\eta_1} \quad (\ell=1,2,3), \qquad q_\ell^{\varepsilon} \quad (\ell=1,2,3)
+\end{equation}
+with respective tail rates $(\lambda^{\eta_1}, \lambda_+^{\eta_1})$ and $(\lambda^\varepsilon, \lambda_+^\varepsilon)$.
+
+\subsection{Full parameter vector}
+
+\begin{equation}
+\btheta = (\underbrace{a_{k\ell}^Q,\, \lambda^Q,\, \lambda_+^Q}_{\text{transition: 11}},\;\; \underbrace{q_\ell^{\eta_1},\, \lambda^{\eta_1},\, \lambda_+^{\eta_1}}_{\text{initial: 5}},\;\; \underbrace{q_\ell^{\varepsilon},\, \lambda^\varepsilon,\, \lambda_+^\varepsilon}_{\text{transitory: 5}})
+\end{equation}
+
+\section{Implied Density and Complete-Data Likelihood}
+
+Given quantile knots $q_1 < q_2 < q_3$ and tail rates $\lambda, \lambda_+$, the piecewise-uniform density is:
+\begin{equation}\label{eq:dens}
+f(x;\, q_1,q_2,q_3,\lambda,\lambda_+) = \begin{cases}
+\tau_1\, \lambda \exp\bigl(\lambda (x - q_1)\bigr) & x \le q_1 \\[4pt]
+\dfrac{\tau_2 - \tau_1}{q_2 - q_1} = \dfrac{0.25}{q_2 - q_1} & q_1 < x \le q_2 \\[6pt]
+\dfrac{\tau_3 - \tau_2}{q_3 - q_2} = \dfrac{0.25}{q_3 - q_2} & q_2 < x \le q_3 \\[6pt]
+(1-\tau_3)\, \lambda_+ \exp\bigl(-\lambda_+ (x - q_3)\bigr) & x > q_3
+\end{cases}
+\end{equation}
+All three distributions ($F_{\eta_1}$, the transition, and $F_\varepsilon$) use this form, each with their own parameters.
+
+\medskip\noindent
+The \textbf{complete-data log-likelihood} for household $i$, given both $y_i = (y_{i1},y_{i2},y_{i3})$ and $\eta_i = (\eta_{i1},\eta_{i2},\eta_{i3})$, is:
+\begin{equation}\label{eq:cdll}
+\ell_i(\btheta;\, y_i,\eta_i) = \underbrace{\log f_{\eta_1}(\eta_{i1};\, \theta^{\eta_1})}_{\text{initial}} + \sum_{t=2}^{3} \underbrace{\log f(\eta_{it};\, q_1(\eta_{i,t-1}),q_2(\eta_{i,t-1}),q_3(\eta_{i,t-1}),\lambda^Q,\lambda_+^Q)}_{\text{transition}} + \sum_{t=1}^{3} \underbrace{\log f_\varepsilon(y_{it} - \eta_{it};\, \theta^\varepsilon)}_{\text{transitory}}
+\end{equation}
+Note that the transition density is evaluated with knots $q_\ell(\eta_{i,t-1})$ that depend on the lagged latent variable through~\eqref{eq:Q}.
+
+\medskip\noindent
+The \textbf{observed-data log-likelihood} integrates out the latent $\eta_i$:
+\begin{equation}
+L(\btheta;\, y) = \sum_{i=1}^N \log \int \exp\bigl(\ell_i(\btheta;\, y_i,\eta_i)\bigr)\, d\eta_i
+\end{equation}
+This integral is intractable, motivating the EM approach.
+
+\section{The ABB Stochastic EM Algorithm}
+
+Starting from an initial $\hat\btheta^{(0)}$, iterate for $s = 0, 1, 2, \dots, S-1$:
+
+\subsection{E-Step: Metropolis--Hastings}
+
+For each household $i$, draw $M$ samples $\eta_i^{(1)},\dots,\eta_i^{(M)}$ from the posterior:
+\begin{equation}\label{eq:posterior}
+f(\eta_i \mid y_i;\, \hat\btheta^{(s)}) \;\propto\; \exp\bigl(\ell_i(\hat\btheta^{(s)};\, y_i,\eta_i)\bigr)
+\end{equation}
+using a random-walk Metropolis--Hastings sampler.  For each period $t=1,2,3$ in turn, propose:
+\begin{equation}
+\eta_{it}^* = \eta_{it}^{\text{current}} + \sigma_{\text{prop},t} \cdot z, \qquad z \sim N(0,1)
+\end{equation}
+and accept with probability $\min\bigl(1,\, f(\eta_i^* \mid y_i;\, \hat\btheta^{(s)}) / f(\eta_i^{\text{current}} \mid y_i;\, \hat\btheta^{(s)})\bigr)$.
+
+The chain is run for $n_{\text{draws}}$ steps; the last $M$ states are kept as approximate draws from the posterior~\eqref{eq:posterior}.
+
+\subsection{M-Step: Quantile Regression}
+
+Given the $M$ posterior draws $\{\eta_i^{(m)} : i=1,\dots,N,\; m=1,\dots,M\}$, update the parameters.
+
+\subsubsection{Transition parameters $\theta^Q$}
+
+In a standard EM algorithm, the M-step would maximize the expected complete-data log-likelihood (the Q-function) with respect to $\theta^Q$.  The transition component of the Q-function is:
+\begin{equation}\label{eq:Qfun}
+Q_{\text{trans}}(\theta^Q \mid \hat\btheta^{(s)}) = E_{\eta \mid y;\, \hat\btheta^{(s)}}\Biggl[\sum_{i=1}^N \sum_{t=2}^3 \log f\bigl(\eta_{it};\, q_1(\eta_{i,t-1}),q_2(\eta_{i,t-1}),q_3(\eta_{i,t-1}),\lambda^Q,\lambda_+^Q\bigr)\Biggr]
+\end{equation}
+where the expectation is over $\eta = \{(\eta_{i1},\eta_{i2},\eta_{i3})\}_{i=1}^N$ drawn from the posterior $\prod_{i=1}^N f(\eta_i \mid y_i;\, \hat\btheta^{(s)})$.
+
+With the $M$ posterior draws from the E-step, we approximate~\eqref{eq:Qfun} by:
+\begin{equation}\label{eq:Qmc}
+Q_{\text{trans}}(\theta^Q \mid \hat\btheta^{(s)}) \approx \frac{1}{M}\sum_{m=1}^M \sum_{i=1}^N \sum_{t=2}^3 \log f\bigl(\eta_{it}^{(m)};\, q_1(\eta_{i,t-1}^{(m)}),q_2(\eta_{i,t-1}^{(m)}),q_3(\eta_{i,t-1}^{(m)}),\lambda^Q,\lambda_+^Q\bigr)
+\end{equation}
+
+To write this compactly, define a pooled dataset by stacking all transition pairs across households ($i=1,\dots,N$), periods ($t=2,3$), and draws ($m=1,\dots,M$).  Index the pooled observations by $j = 1,\dots,n$ where
+\begin{equation}
+n = N \times (T-1) \times M = N \times 2 \times M
+\end{equation}
+For the $j$-th pooled observation, let:
+\begin{equation}
+Y_j = \eta_{it}^{(m)}, \qquad X_j = \eta_{i,t-1}^{(m)}
+\end{equation}
+denote the current and lagged persistent components, respectively.  For example, with $N=300$ and $M=50$, we have $n = 300 \times 2 \times 50 = 30{,}000$ pooled pairs.
+
+Define the Hermite basis row vector for the $j$-th observation:
+\begin{equation}
+\mathbf{h}_j = \bigl(1,\; z_j,\; z_j^2 - 1\bigr), \qquad z_j = X_j / \sigma_y
+\end{equation}
+and let $H$ denote the $n \times 3$ matrix with rows $\mathbf{h}_j$.  The quantile knots at the $j$-th observation are $q_\ell(X_j) = \mathbf{h}_j^\top \mathbf{a}_\ell$ where $\mathbf{a}_\ell = (a_{0\ell}^Q, a_{1\ell}^Q, a_{2\ell}^Q)^\top$.
+
+\medskip\noindent
+\textbf{ABB's approach:}  Instead of maximizing~\eqref{eq:Qmc}, ABB solve, \textbf{for each quantile level $\ell = 1, 2, 3$ separately}:
+\begin{equation}\label{eq:qr}
+\hat{\mathbf{a}}_\ell^{(s+1)} = \mathop{\mathrm{argmin}}_{\mathbf{a} \in \mathbb{R}^3} \; \frac{1}{n} \sum_{j=1}^{n} \rho_{\tau_\ell}\bigl(Y_j - \mathbf{h}_j^\top \mathbf{a}\bigr)
+\end{equation}
+where $\rho_\tau(u) = u\,(\tau - \mathbf{1}\{u < 0\})$ is the quantile regression check function.
+
+\medskip\noindent
+This is a \textbf{standard linear quantile regression} of $Y_j$ on the basis $\mathbf{h}_j$ at quantile level~$\tau_\ell$.  It is a convex optimization problem solved independently for each~$\ell$.  The starting value for the optimizer at EM iteration $s+1$ is $\hat{\mathbf{a}}_\ell^{(s)}$.  At $s=0$:
+\begin{equation}
+a_{0\ell}^{(0)} = 0.1 \times \hat{q}_\ell(y), \qquad a_{1\ell}^{(0)} = 0.5\,\sigma_y, \qquad a_{2\ell}^{(0)} = 0
+\end{equation}
+where $\hat{q}_\ell(y)$ is the sample $\tau_\ell$-quantile of all observed $y_{it}$ values.
+
+\medskip\noindent
+\textbf{Tail parameters:}  After solving~\eqref{eq:qr}, compute residuals:
+\begin{align}
+r_j^{(1)} &= Y_j - \mathbf{h}_j^\top \hat{\mathbf{a}}_1^{(s+1)}, \qquad j=1,\dots,n \\
+r_j^{(3)} &= Y_j - \mathbf{h}_j^\top \hat{\mathbf{a}}_3^{(s+1)}, \qquad j=1,\dots,n
+\end{align}
+The tail rates are updated by their closed-form MLEs (conditional on the quantile knots):
+\begin{equation}
+\hat\lambda^{Q,(s+1)} = \frac{\#\{j : r_j^{(1)} \le 0\}}{-\sum_{j:\, r_j^{(1)} \le 0} r_j^{(1)}}, \qquad
+\hat\lambda_+^{Q,(s+1)} = \frac{\#\{j : r_j^{(3)} \ge 0\}}{\sum_{j:\, r_j^{(3)} \ge 0} r_j^{(3)}}
+\end{equation}
+
+\subsubsection{Initial distribution parameters}
+
+Stack $\eta_{i1}^{(m)}$ for all $i=1,\dots,N$ and $m=1,\dots,M$ (total $NM$ values).  The quantile estimates are sample quantiles:
+\begin{equation}
+\hat{q}_\ell^{\eta_1,(s+1)} = \text{sample $\tau_\ell$-quantile of } \{\eta_{i1}^{(m)}\}_{i=1,\dots,N,\; m=1,\dots,M}
+\end{equation}
+Tail rates $\hat\lambda^{\eta_1}$, $\hat\lambda_+^{\eta_1}$ are updated by the same closed-form formula.
+
+\subsubsection{Transitory shock parameters}
+
+Stack all residuals $\hat\varepsilon_{it}^{(m)} = y_{it} - \eta_{it}^{(m)}$ for all $i,t,m$ (total $NTM = 3NM$ values):
+\begin{equation}
+\hat{q}_\ell^{\varepsilon,(s+1)} = \text{sample $\tau_\ell$-quantile of } \{y_{it} - \eta_{it}^{(m)}\}_{i=1,\dots,N,\; t=1,2,3,\; m=1,\dots,M}
+\end{equation}
+followed by centering: $\hat{q}_\ell^{\varepsilon,(s+1)} \leftarrow \hat{q}_\ell^{\varepsilon,(s+1)} - \frac{1}{3}\sum_{\ell'=1}^3 \hat{q}_{\ell'}^{\varepsilon,(s+1)}$.
+
+\subsection{Averaging}
+
+After $S$ iterations, the final estimate is the average over the last $\tilde{S} = S/2$ iterations:
+\begin{equation}
+\hat\btheta = \frac{1}{\tilde{S}} \sum_{s=S-\tilde{S}+1}^{S} \hat\btheta^{(s)}
+\end{equation}
+
+\section{Key Observation: QR $\neq$ MLE}
+
+The M-step~\eqref{eq:qr} minimizes the check function $\rho_{\tau_\ell}$, \textbf{not} the negative of the Q-function~\eqref{eq:Qmc}.  These are different objectives:
+
+\begin{itemize}
+\item The check function treats each quantile level $\ell$ independently.  When $\hat{\mathbf{a}}_1$ changes, it does not affect the objective for $\hat{\mathbf{a}}_2$ or $\hat{\mathbf{a}}_3$.
+
+\item The Q-function~\eqref{eq:Qmc} couples all three quantile levels through the density~\eqref{eq:dens}.  Moving $q_1(X_j)$ changes the width of the segment $(q_1, q_2]$ and thus the density value for all observations in that segment.
+
+\item The MLE M-step must ensure $q_1(X_j) < q_2(X_j) < q_3(X_j)$ for a valid density at each observation~$j$.  The QR~\eqref{eq:qr} imposes no such constraint.
+\end{itemize}
+
+\noindent
+As ABB note (p.~710): ``unlike in EM, our problem is not likelihood-based.  Instead, we exploit the computational convenience of quantile regression and replace likelihood maximization by a sequence of quantile regressions.''
+
+\medskip\noindent
+The standard EM M-step would instead solve:
+\begin{equation}\label{eq:mle}
+\hat\theta^{Q,(s+1)} = \mathop{\mathrm{argmax}}_{\theta^Q} \; \frac{1}{n} \sum_{j=1}^{n} \log f\bigl(Y_j;\, q_1(X_j),q_2(X_j),q_3(X_j),\lambda^Q,\lambda_+^Q\bigr)
+\end{equation}
+which jointly optimizes over all quantile coefficients $\{\mathbf{a}_1, \mathbf{a}_2, \mathbf{a}_3\}$ and tail rates $\{\lambda^Q, \lambda_+^Q\}$ through the density~\eqref{eq:dens}.  This guarantees the EM monotonicity property: the observed-data log-likelihood $L(\hat\btheta^{(s+1)}; y) \ge L(\hat\btheta^{(s)}; y)$ at each iteration (in exact EM; the stochastic version targets the correct stationary distribution).
+
+\end{document}
