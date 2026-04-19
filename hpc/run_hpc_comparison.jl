@@ -4,9 +4,9 @@ run_hpc_comparison.jl — Compare Grid MLE, SML, and QR on same data.
 Usage: julia run_hpc_comparison.jl <N> <seed> [G] [R_sml]
 
 Data generated with rejection sampling (exact draws from model).
-Grid MLE: Boole's rule, numerical gradient.
-SML: importance-sampling-based, numerical gradient.
-QR: stochastic EM, estimates M from IQR.
+Grid MLE: Boole's rule, GPU-batched forward filter, numerical gradient.
+SML: numerical gradient (CPU).
+QR: stochastic EM, estimates M from IQR, GPU-batched FFBS.
 =#
 
 using Serialization, Printf
@@ -23,10 +23,22 @@ R_sml = length(ARGS) >= 4 ? parse(Int, ARGS[4]) : 500
 include("../cspline_abb.jl")
 using Optim, LineSearches
 
+# Try to load CUDA
+use_gpu = false
+try
+    @eval using CUDA
+    if CUDA.functional()
+        global use_gpu = true
+        @printf("GPU available: %s\n", CUDA.name(CUDA.device()))
+    end
+catch
+end
+
 K = 2; σy = 1.0; τ = [0.25, 0.50, 0.75]
 tp = make_true_cspline()
 
-@printf("HPC comparison: N=%d, seed=%d, G=%d, R_sml=%d\n", N, seed, G, R_sml); flush(stdout)
+@printf("HPC comparison: N=%d, seed=%d, G=%d, R_sml=%d, GPU=%s\n",
+        N, seed, G, R_sml, use_gpu); flush(stdout)
 
 # Generate data (rejection sampling — exact draws from model)
 y, eta = generate_data_cspline(N, tp.a_Q, tp.M_Q,
@@ -36,13 +48,34 @@ y, eta = generate_data_cspline(N, tp.a_Q, tp.M_Q,
 
 v_true = pack_cspline(tp.a_Q, tp.M_Q, tp.a_init, tp.M_init,
                        tp.a_eps1, tp.a_eps3, tp.M_eps)
+np = length(v_true)
 
-# ---- Grid MLE ----
+# ---- Grid MLE (GPU-batched forward filter) ----
 @printf("  Grid MLE (G=%d)...\n", G); flush(stdout)
+
+# Use GPU-batched likelihood if available, otherwise standard
+ws = CSplineWorkspace(G, K)
+function grid_obj(v)
+    aQ,MQ,ai,Mi,ae1,ae3,Me = unpack_cspline(v, K)
+    # GPU-batched version handles both GPU and CPU fallback
+    val = cspline_neg_loglik_gpu(aQ, MQ, ai, Mi, ae1, ae3, Me, y, K, σy, τ, ws)
+    isinf(val) ? 1e10 : val
+end
+function grid_grad!(g, v)
+    h = 1e-3; vt = copy(v)
+    @inbounds for j in 1:np
+        vt[j]=v[j]+h; fp=grid_obj(vt)
+        vt[j]=v[j]-h; fm=grid_obj(vt)
+        vt[j]=v[j]; g[j]=(fp-fm)/(2h)
+    end
+end
+
 t_ml = @elapsed begin
-    v_ml, nll_ml = estimate_cspline_ml(y, K, σy, v_true, τ;
-                                        G=G, maxiter=500, verbose=false,
-                                        use_analytical_grad=false)
+    res_ml = optimize(grid_obj, grid_grad!, v_true,
+                       LBFGS(; linesearch=LineSearches.BackTracking()),
+                       Optim.Options(iterations=500, g_tol=1e-8))
+    v_ml = Optim.minimizer(res_ml)
+    nll_ml = Optim.minimum(res_ml)
 end
 aQ_ml, MQ_ml, ainit_ml, Mi_ml, ae1_ml, ae3_ml, Me_ml = unpack_cspline(v_ml, K)
 @printf("    nll=%.4f  ρ=%.4f  ae3=%.4f  M_Q=%.1f  M_eps=%.2f  time=%.0fs\n",
@@ -50,7 +83,6 @@ aQ_ml, MQ_ml, ainit_ml, Mi_ml, ae1_ml, ae3_ml, Me_ml = unpack_cspline(v_ml, K)
 
 # ---- SML ----
 @printf("  SML (R=%d)...\n", R_sml); flush(stdout)
-np = length(v_true)
 function sml_obj(v)
     aQ,MQ,ai,Mi,ae1,ae3,Me = unpack_cspline(v, K)
     val = cspline_neg_loglik_sml(aQ, MQ, ai, Mi, ae1, ae3, Me, y, K, σy, τ; R=R_sml)
@@ -90,7 +122,7 @@ end
 
 # ---- Save results ----
 summary = Dict{Symbol, Any}(
-    :N => N, :seed => seed, :G => G, :R_sml => R_sml,
+    :N => N, :seed => seed, :G => G, :R_sml => R_sml, :use_gpu => use_gpu,
     # Grid MLE
     :ml_v => v_ml, :ml_nll => nll_ml, :ml_time => t_ml,
     :ml_a_Q => aQ_ml, :ml_M_Q => MQ_ml,

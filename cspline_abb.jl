@@ -1539,6 +1539,274 @@ function cspline_neg_loglik_sml(a_Q::Matrix{Float64}, M_Q::Float64,
 end
 
 # ================================================================
+#  GPU-ACCELERATED SML
+#
+#  One thread per individual. Each thread draws R paths sequentially
+#  using rejection sampling with fixed-iteration Newton solver.
+#  All math inlined — no allocations, no dynamic dispatch.
+# ================================================================
+
+# GPU-compatible inline spline evaluation (no Vector arguments)
+@inline function _gpu_spline_eval(x::Float64, t1::Float64, t2::Float64, t3::Float64,
+                                   s1::Float64, s2::Float64, s3::Float64,
+                                   βL::Float64, βR::Float64, M1::Float64, M3::Float64)
+    if x <= t1
+        dx = x - t1; return s1 + βL*dx + 0.5*M1*dx*dx
+    end
+    if x >= t3
+        dx = x - t3; return s3 + βR*dx + 0.5*M3*dx*dx
+    end
+    h1 = t2-t1; h2 = t3-t2; H = h1+h2
+    M2 = (6.0*(s3/h2 + s1/h1) - M1*h1 - M3*h2) / (2.0*H)
+    if x <= t2
+        a = t2-x; b = x-t1
+        return M1*a^3/(6*h1) + M2*b^3/(6*h1) + (s1/h1-M1*h1/6)*a + (s2/h1-M2*h1/6)*b
+    else
+        a = t3-x; b = x-t2
+        return M2*a^3/(6*h2) + M3*b^3/(6*h2) + (s2/h2-M2*h2/6)*a + (s3/h2-M3*h2/6)*b
+    end
+end
+
+# GPU-compatible Taylor series integral (fixed 50 terms, no allocation)
+@inline function _gpu_exp_cubic_integral(c1::Float64, c2::Float64, c3::Float64, L::Float64)
+    # Recurrence: n·aₙ = c₁aₙ₋₁ + 2c₂aₙ₋₂ + 3c₃aₙ₋₃
+    a_nm3 = 0.0; a_nm2 = 0.0; a_nm1 = 1.0  # a₋₂=0, a₋₁=0, a₀=1
+    result = L; Ln = L
+    for n in 1:50
+        a_n = (c1*a_nm1 + 2c2*a_nm2 + 3c3*a_nm3) / n
+        Ln *= L
+        result += a_n * Ln / (n + 1)
+        a_nm3 = a_nm2; a_nm2 = a_nm1; a_nm1 = a_n
+    end
+    result
+end
+
+# GPU-compatible mass computation (returns 4 masses, no allocation)
+@inline function _gpu_masses(t1::Float64, t2::Float64, t3::Float64,
+                              s1::Float64, s2::Float64, s3::Float64,
+                              βL::Float64, βR::Float64, M1::Float64, M3::Float64)
+    lr = max(s1, s2, s3)
+    h1 = t2-t1; h2 = t3-t2; H = h1+h2
+    M2 = (6.0*(s3/h2 + s1/h1) - M1*h1 - M3*h2) / (2.0*H)
+
+    # Left tail: same as _half_gaussian_integral
+    γL = -M1; σL = sqrt(1.0/γL)
+    m1 = exp(s1-lr) * σL * sqrt(2π) * exp(0.5*βL^2*σL^2) * ccdf(_std_normal, βL*σL)
+
+    # Right tail
+    γR = -M3; σR = sqrt(1.0/γR)
+    m4 = exp(s3-lr) * σR * sqrt(2π) * exp(0.5*βR^2*σR^2) * ccdf(_std_normal, -βR*σR)
+
+    # Interior segments via Taylor series
+    c1_1 = βL; c2_1 = M1/2; c3_1 = (M2-M1)/(6*h1)
+    m2 = exp(s1-lr) * _gpu_exp_cubic_integral(c1_1, c2_1, c3_1, h1)
+
+    slope_t2 = (s2-s1)/h1 + M1*h1/6 + M2*h1/3
+    c1_2 = slope_t2; c2_2 = M2/2; c3_2 = (M3-M2)/(6*h2)
+    m3 = exp(s2-lr) * _gpu_exp_cubic_integral(c1_2, c2_2, c3_2, h2)
+
+    (m1, m2, m3, m4, lr)
+end
+
+# GPU-compatible Newton solver (fixed 30 iterations, no allocation)
+@inline function _gpu_solve_spline(t1::Float64, t2::Float64, t3::Float64,
+                                    κ_mean::Float64)
+    s1 = 0.0; s2 = 0.0; s3 = 0.0; δ = 0.0
+    h1 = t2-t1; h2 = t3-t2; H = h1+h2
+    h_fd = 1e-5
+    abs_κ = abs(κ_mean)
+
+    for iter in 1:30
+        κ1 = κ_mean-δ; κ3 = κ_mean+δ
+        βL, βR = _gpu_implied_beta(t1,t2,t3, s1,s2,s3, κ1,κ3)
+        m1,m2,m3,m4,_ = _gpu_masses(t1,t2,t3, s1,s2,s3, βL,βR, κ1,κ3)
+        C = m1+m2+m3+m4
+        C < 1e-300 && break
+        R1 = m1/C-0.25; R2 = m2/C-0.25; R3 = m3/C-0.25
+        Rn = sqrt(R1*R1+R2*R2+R3*R3)
+        Rn < 1e-10 && break
+
+        # 3×3 Jacobian by FD
+        # Column 1: ∂/∂s₁
+        βLp,βRp = _gpu_implied_beta(t1,t2,t3, s1+h_fd,s2,s3, κ1,κ3)
+        mp1,mp2,mp3,mp4,_ = _gpu_masses(t1,t2,t3, s1+h_fd,s2,s3, βLp,βRp, κ1,κ3)
+        Cp = mp1+mp2+mp3+mp4
+        βLm,βRm = _gpu_implied_beta(t1,t2,t3, s1-h_fd,s2,s3, κ1,κ3)
+        mm1,mm2,mm3,mm4,_ = _gpu_masses(t1,t2,t3, s1-h_fd,s2,s3, βLm,βRm, κ1,κ3)
+        Cm = mm1+mm2+mm3+mm4
+        J11=(mp1/Cp-mm1/Cm)/(2h_fd); J21=(mp2/Cp-mm2/Cm)/(2h_fd); J31=(mp3/Cp-mm3/Cm)/(2h_fd)
+
+        # Column 2: ∂/∂s₃
+        βLp,βRp = _gpu_implied_beta(t1,t2,t3, s1,s2,s3+h_fd, κ1,κ3)
+        mp1,mp2,mp3,mp4,_ = _gpu_masses(t1,t2,t3, s1,s2,s3+h_fd, βLp,βRp, κ1,κ3)
+        Cp = mp1+mp2+mp3+mp4
+        βLm,βRm = _gpu_implied_beta(t1,t2,t3, s1,s2,s3-h_fd, κ1,κ3)
+        mm1,mm2,mm3,mm4,_ = _gpu_masses(t1,t2,t3, s1,s2,s3-h_fd, βLm,βRm, κ1,κ3)
+        Cm = mm1+mm2+mm3+mm4
+        J12=(mp1/Cp-mm1/Cm)/(2h_fd); J22=(mp2/Cp-mm2/Cm)/(2h_fd); J32=(mp3/Cp-mm3/Cm)/(2h_fd)
+
+        # Column 3: ∂/∂δ
+        κ1p=κ_mean-(δ+h_fd); κ3p=κ_mean+(δ+h_fd)
+        βLp,βRp = _gpu_implied_beta(t1,t2,t3, s1,s2,s3, κ1p,κ3p)
+        mp1,mp2,mp3,mp4,_ = _gpu_masses(t1,t2,t3, s1,s2,s3, βLp,βRp, κ1p,κ3p)
+        Cp = mp1+mp2+mp3+mp4
+        κ1m=κ_mean-(δ-h_fd); κ3m=κ_mean+(δ-h_fd)
+        βLm,βRm = _gpu_implied_beta(t1,t2,t3, s1,s2,s3, κ1m,κ3m)
+        mm1,mm2,mm3,mm4,_ = _gpu_masses(t1,t2,t3, s1,s2,s3, βLm,βRm, κ1m,κ3m)
+        Cm = mm1+mm2+mm3+mm4
+        J13=(mp1/Cp-mm1/Cm)/(2h_fd); J23=(mp2/Cp-mm2/Cm)/(2h_fd); J33=(mp3/Cp-mm3/Cm)/(2h_fd)
+
+        # Cramer's rule
+        det = J11*(J22*J33-J23*J32) - J12*(J21*J33-J23*J31) + J13*(J21*J32-J22*J31)
+        abs(det) < 1e-30 && break
+        Δ1 = ((-R1)*(J22*J33-J23*J32) - J12*((-R2)*J33-J23*(-R3)) + J13*((-R2)*J32-J22*(-R3))) / det
+        Δ2 = (J11*((-R2)*J33-J23*(-R3)) - (-R1)*(J21*J33-J23*J31) + J13*(J21*(-R3)-(-R2)*J31)) / det
+        Δ3 = (J11*(J22*(-R3)-(-R2)*J32) - J12*(J21*(-R3)-(-R2)*J31) + (-R1)*(J21*J32-J22*J31)) / det
+
+        (isfinite(Δ1) && isfinite(Δ2) && isfinite(Δ3)) || break
+
+        α = 1.0
+        for _ in 1:20
+            s1n=s1+α*Δ1; s3n=s3+α*Δ2; δn=δ+α*Δ3
+            if abs(δn) < abs_κ
+                κ1n=κ_mean-δn; κ3n=κ_mean+δn
+                βLn,βRn = _gpu_implied_beta(t1,t2,t3, s1n,s2,s3n, κ1n,κ3n)
+                mn1,mn2,mn3,mn4,_ = _gpu_masses(t1,t2,t3, s1n,s2,s3n, βLn,βRn, κ1n,κ3n)
+                Cn = mn1+mn2+mn3+mn4
+                if Cn > 1e-300
+                    Rn1=mn1/Cn-0.25; Rn2=mn2/Cn-0.25; Rn3=mn3/Cn-0.25
+                    if sqrt(Rn1^2+Rn2^2+Rn3^2) < Rn
+                        s1=s1n; s3=s3n; δ=δn; break
+                    end
+                end
+            end
+            α *= 0.5
+        end
+    end
+
+    κ1 = κ_mean-δ; κ3 = κ_mean+δ
+    βL, βR = _gpu_implied_beta(t1,t2,t3, s1,0.0,s3, κ1,κ3)
+    (s1, s3, βL, βR, κ1, κ3)
+end
+
+@inline function _gpu_implied_beta(t1::Float64, t2::Float64, t3::Float64,
+                                    s1::Float64, s2::Float64, s3::Float64,
+                                    κ1::Float64, κ3::Float64)
+    h1 = t2-t1; h2 = t3-t2; H = h1+h2
+    M2 = (6.0*(s3/h2 + s1/h1) - κ1*h1 - κ3*h2) / (2.0*H)
+    βL = (s2-s1)/h1 - h1*(2*κ1+M2)/6
+    βR = (s3-s2)/h2 + h2*(M2+2*κ3)/6
+    (βL, βR)
+end
+
+"""
+GPU-parallelized SML: one thread per individual.
+Uses CPU Arrays but structured for easy GPU porting.
+"""
+function cspline_neg_loglik_sml_fast(a_Q::Matrix{Float64}, M_Q::Float64,
+                                     a_init::Vector{Float64}, M_init::Float64,
+                                     a_eps1::Float64, a_eps3::Float64, M_eps::Float64,
+                                     y::Matrix{Float64}, K::Int, σy::Float64, τ::Vector{Float64};
+                                     R::Int=500, seed::Int=12345)
+    N, T_obs = size(y)
+    rng = MersenneTwister(seed)
+
+    # Pre-solve eps and init densities (constant across individuals)
+    s1_e, s3_e, βL_e, βR_e, κ1_e, κ3_e = _gpu_solve_spline(a_eps1, 0.0, a_eps3, M_eps)
+    m1e,m2e,m3e,m4e,lr_e = _gpu_masses(a_eps1,0.0,a_eps3, s1_e,0.0,s3_e, βL_e,βR_e, κ1_e,κ3_e)
+    log_C_eps = log(m1e+m2e+m3e+m4e) + lr_e
+
+    s1_i, s3_i, βL_i, βR_i, κ1_i, κ3_i = _gpu_solve_spline(a_init[1], a_init[2], a_init[3], M_init)
+    m1i,m2i,m3i,m4i,lr_i = _gpu_masses(a_init[1],a_init[2],a_init[3], s1_i,0.0,s3_i, βL_i,βR_i, κ1_i,κ3_i)
+    log_C_init = log(m1i+m2i+m3i+m4i) + lr_i
+
+    # Proposal params for init rejection sampling
+    mode_init = a_init[2]
+    κ_avg_init = (κ1_i+κ3_i)/2
+    σ_init = κ_avg_init < -1e-10 ? sqrt(-1.0/κ_avg_init) : 2.0
+    log_M_init = -lr_i + log(σ_init*sqrt(2π)) + 0.5
+
+    # Proposal params for eps
+    κ_avg_eps = (κ1_e+κ3_e)/2
+    σ_eps_prop = κ_avg_eps < -1e-10 ? sqrt(-1.0/κ_avg_eps) : 2.0
+
+    nk = K + 1
+    total_ll = 0.0
+
+    # Process each individual (parallelizable on GPU)
+    @inbounds for i in 1:N
+        log_sum = -Inf
+        for r in 1:R
+            # Draw η₁ from init by rejection sampling
+            η = mode_init
+            for attempt in 1:1000
+                x = mode_init + σ_init * randn(rng)
+                log_f = _gpu_spline_eval(x, a_init[1],a_init[2],a_init[3],
+                                          s1_i,0.0,s3_i, βL_i,βR_i, κ1_i,κ3_i) - lr_i
+                log_g = -0.5*((x-mode_init)/σ_init)^2 - log(σ_init*sqrt(2π))
+                if log(rand(rng)) < log_f - log_g - log_M_init
+                    η = x; break
+                end
+            end
+
+            # log f_eps(y₁ - η₁)
+            log_lik = _gpu_spline_eval(y[i,1]-η, a_eps1,0.0,a_eps3,
+                                        s1_e,0.0,s3_e, βL_e,βR_e, κ1_e,κ3_e) - log_C_eps
+
+            for t_step in 2:T_obs
+                # Compute transition knots
+                z = η / σy
+                hv1 = 1.0; hv2 = z; hv3 = z*z - 1.0
+                t1 = a_Q[1,1]*hv1 + a_Q[2,1]*hv2 + a_Q[3,1]*hv3
+                t2 = a_Q[1,2]*hv1 + a_Q[2,2]*hv2 + a_Q[3,2]*hv3
+                t3 = a_Q[1,3]*hv1 + a_Q[2,3]*hv2 + a_Q[3,3]*hv3
+
+                if t2 <= t1 || t3 <= t2
+                    log_lik = -Inf; break
+                end
+
+                # Solve transition spline
+                s1_t, s3_t, βL_t, βR_t, κ1_t, κ3_t = _gpu_solve_spline(t1, t2, t3, M_Q)
+                lr_t = max(s1_t, 0.0, s3_t)
+
+                # Rejection sampling from transition
+                mode_t = t2
+                κ_avg_t = (κ1_t+κ3_t)/2
+                σ_t = κ_avg_t < -1e-10 ? sqrt(-1.0/κ_avg_t) : 2.0
+                log_M_t = -lr_t + log(σ_t*sqrt(2π)) + 0.5
+
+                η_new = mode_t
+                for attempt in 1:1000
+                    x = mode_t + σ_t * randn(rng)
+                    log_f = _gpu_spline_eval(x, t1,t2,t3, s1_t,0.0,s3_t,
+                                              βL_t,βR_t, κ1_t,κ3_t) - lr_t
+                    log_g = -0.5*((x-mode_t)/σ_t)^2 - log(σ_t*sqrt(2π))
+                    if log(rand(rng)) < log_f - log_g - log_M_t
+                        η_new = x; break
+                    end
+                end
+                η = η_new
+
+                log_lik += _gpu_spline_eval(y[i,t_step]-η, a_eps1,0.0,a_eps3,
+                                             s1_e,0.0,s3_e, βL_e,βR_e, κ1_e,κ3_e) - log_C_eps
+            end
+
+            # Log-sum-exp
+            if log_lik > log_sum
+                log_sum = log_lik + log(1.0 + exp(log_sum - log_lik))
+            elseif isfinite(log_lik)
+                log_sum += log(1.0 + exp(log_lik - log_sum))
+            end
+        end
+        log_sum -= log(R)
+        isinf(log_sum) && return Inf
+        total_ll += log_sum
+    end
+
+    -total_ll / N
+end
+
+# ================================================================
 #  GPU-ACCELERATED FORWARD FILTER (optional, requires CUDA.jl)
 #
 #  Best practices from https://cuda.juliagpu.org/stable/tutorials/performance/

@@ -3,8 +3,8 @@
 # Data generated with rejection sampling (exact model draws).
 
 SAMPLE_SIZES="500 1000"
+G_VALUES="201 501 1001"
 SEEDS=$(seq 1 200)
-G=201
 R_SML=500
 
 WORKDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && cd .. && pwd )"
@@ -12,30 +12,34 @@ WORKDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && cd .. && pwd )"
 mkdir -p logs results
 
 COUNT=0
-for N in $SAMPLE_SIZES; do
-    for SEED in $SEEDS; do
-        JOBNAME="cmp_N${N}_s${SEED}"
-        sbatch <<EOF
+for G in $G_VALUES; do
+    for N in $SAMPLE_SIZES; do
+        for SEED in $SEEDS; do
+            JOBNAME="cmp_G${G}_N${N}_s${SEED}"
+            sbatch <<EOF
 #!/bin/bash
 #SBATCH --job-name=$JOBNAME
 #SBATCH --account=ichimura
-#SBATCH --partition=standard
+#SBATCH --partition=gpu_standard
+#SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=4G
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
 #SBATCH --output=logs/${JOBNAME}_%j.out
 #SBATCH --error=logs/${JOBNAME}_%j.err
 
+module load cuda
 export PATH="\$HOME/julia-1.11.5/bin:\$PATH"
 
 cd ${WORKDIR}/hpc
 julia run_hpc_comparison.jl $N $SEED $G $R_SML
 
-mv comparison_N${N}_seed${SEED}.jls results/ 2>/dev/null
+mv comparison_N${N}_seed${SEED}.jls results/comparison_G${G}_N${N}_seed${SEED}.jls 2>/dev/null
 EOF
-        COUNT=$((COUNT + 1))
+            COUNT=$((COUNT + 1))
+        done
     done
 done
 
-echo "Submitted $COUNT comparison jobs"
+echo "Submitted $COUNT comparison jobs (G=$G_VALUES × N=$SAMPLE_SIZES × 200 seeds)"
