@@ -2510,15 +2510,16 @@ function estimate_cspline_ml(y::Matrix{Float64}, K::Int, σy::Float64,
             val = cspline_neg_loglik_and_grad!(g, v, y, K, σy, τ, ws)
             isinf(val) && fill!(g, 0.0)
         else
-            grad_h = 1e-3
             ws.vtmp .= v
             @inbounds for j in 1:np
-                ws.vtmp[j] = v[j] + grad_h
+                # Relative step: h = max(1e-5, 1e-4 × |v_j|)
+                h_j = max(1e-5, 1e-4 * abs(v[j]))
+                ws.vtmp[j] = v[j] + h_j
                 fp = obj(ws.vtmp)
-                ws.vtmp[j] = v[j] - grad_h
+                ws.vtmp[j] = v[j] - h_j
                 fm = obj(ws.vtmp)
                 ws.vtmp[j] = v[j]
-                g[j] = (fp - fm) / (2 * grad_h)
+                g[j] = (fp - fm) / (2 * h_j)
             end
         end
     end

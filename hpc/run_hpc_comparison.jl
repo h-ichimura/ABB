@@ -62,11 +62,12 @@ function grid_obj(v)
     isinf(val) ? 1e10 : val
 end
 function grid_grad!(g, v)
-    h = 1e-3; vt = copy(v)
+    vt = copy(v)
     @inbounds for j in 1:np
-        vt[j]=v[j]+h; fp=grid_obj(vt)
-        vt[j]=v[j]-h; fm=grid_obj(vt)
-        vt[j]=v[j]; g[j]=(fp-fm)/(2h)
+        h_j = max(1e-5, 1e-4 * abs(v[j]))
+        vt[j]=v[j]+h_j; fp=grid_obj(vt)
+        vt[j]=v[j]-h_j; fm=grid_obj(vt)
+        vt[j]=v[j]; g[j]=(fp-fm)/(2h_j)
     end
 end
 
@@ -89,11 +90,12 @@ function sml_obj(v)
     isinf(val) ? 1e10 : val
 end
 function sml_grad!(g, v)
-    h = 1e-3; vt = copy(v)
+    vt = copy(v)
     @inbounds for j in 1:np
-        vt[j]=v[j]+h; fp=sml_obj(vt)
-        vt[j]=v[j]-h; fm=sml_obj(vt)
-        vt[j]=v[j]; g[j]=(fp-fm)/(2h)
+        h_j = max(1e-5, 1e-4 * abs(v[j]))
+        vt[j]=v[j]+h_j; fp=sml_obj(vt)
+        vt[j]=v[j]-h_j; fm=sml_obj(vt)
+        vt[j]=v[j]; g[j]=(fp-fm)/(2h_j)
     end
 end
 t_sml = @elapsed begin
