@@ -1,0 +1,613 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[paperwidth=21.587cm,paperheight=27.937cm,
+            left=3cm,right=2.5cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{graphicx}
+\usepackage{setspace}
+\onehalfspacing
+
+\definecolor{myblue}{RGB}{0,114,178}
+\definecolor{myred}{RGB}{213,94,0}
+
+\hypersetup{colorlinks=true,linkcolor=myblue,citecolor=myblue,urlcolor=myblue}
+
+\title{\textbf{Likelihood Estimation for the Nonlinear Panel Data Framework\\
+of Arellano, Blundell and Bonhomme (2017):\\
+Discontinuities, Efficiency, and a Smooth Extension}\\[0.6em]
+\large Preliminary Draft}
+\author{Hidehiko Ichimura and Risheng Xu\\
+University of Arizona}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Arellano, Blundell, and Bonhomme (2017, ABB) propose a nonlinear panel data
+framework for earnings and consumption dynamics, estimated via a stochastic EM
+algorithm with a quantile-regression (QR) M-step.
+This paper investigates three aspects of the ABB framework.
+First, the piecewise-uniform density with exponential tails creates
+discontinuities at interior quantile nodes, causing difficulties for
+likelihood-based estimation.
+Second, the QR estimator, while computationally tractable, does not maximise
+the likelihood of the observed data and is therefore inefficient under correct
+specification.
+Third, QR targets quantiles of unobservable components ($\eta$ and
+$\varepsilon$), and it is unclear how well these translate to the distribution
+of the observables $y$.
+In contrast, MLE directly optimises the likelihood of observed $y$.
+
+We make three contributions.
+(1) We conduct Monte Carlo comparisons of simulated MLE (SML), grid-based MLE,
+and QR under both the original ABB density and a smooth extension.
+(2) We propose a smooth version of the ABB model using a $C^2$ cubic spline
+log-density with Gaussian tails, which is a direct extension of the
+Arellano--Bonhomme (2012) and ABB quantile framework while connecting to the
+log-spline density estimation literature.
+(3) We analyse sources of difficulty for MLE, including the role of
+weak identification of tail parameters through deconvolution, the effect of
+data generation accuracy, and the information structure via the Louis (1982)
+decomposition.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+%==========================================================================
+\section{Introduction}
+\label{sec:intro}
+%==========================================================================
+
+Household earnings and consumption dynamics over the life cycle are among the
+most studied topics in empirical economics.
+Arellano, Blundell, and Bonhomme (2017, hereafter ABB) make a landmark
+contribution by developing a fully nonlinear panel data framework in which the
+persistent earnings component $\eta_{it}$ follows a first-order Markov process
+whose conditional quantile function is a flexible polynomial series in
+$(\eta_{i,t-1}, \text{age}_{it})$.
+Their framework allows earnings persistence to vary with the sign and magnitude
+of the current shock, producing the empirically prominent ``nonlinear
+persistence'' pattern documented in PSID and Norwegian administrative data.
+
+ABB estimate the model using a stochastic EM algorithm whose M-step consists of
+a sequence of quantile regressions (QR) rather than likelihood maximisation.
+This paper examines three limitations of this approach and proposes remedies.
+
+\subsection*{Limitation 1: Discontinuities in the Density}
+
+The ABB parameterisation specifies the conditional density of
+$\varepsilon_{it} = y_{it} - \eta_{it}$ as piecewise uniform on the intervals
+between quantile knots $A(\ell)$, with exponential tails outside
+$[A(1), A(L)]$.
+The resulting density is \emph{discontinuous} at the interior knots
+$A(2), \ldots, A(L-1)$: it jumps between segments of different heights.
+Furthermore, the density of $\eta_{it} \mid \eta_{i,t-1}$ has the same
+piecewise-uniform structure, so the conditional density of
+$y_{it} \mid \eta_{i,t-1}$ (a convolution) inherits kinks from both sources.
+
+These discontinuities make the log-likelihood non-differentiable, preventing
+the use of gradient-based optimisation.
+When derivative-free methods (e.g., Nelder--Mead) are used, the flat interior
+segments allow parameter vectors far from the truth to attain comparable or
+higher likelihood values, so the MLE does not reliably locate the true
+parameter.
+
+\subsection*{Limitation 2: Efficiency Loss of the QR Estimator}
+
+The QR M-step minimises the check function
+$\rho_\tau(u) = u(\tau - \mathbf{1}\{u \le 0\})$
+rather than the log-likelihood.
+Under correct specification, the QR estimator is consistent but
+\emph{not efficient} in the Cram\'er--Rao sense.
+The efficiency loss depends on the density shape between the quantile knots
+--- information that QR discards.
+
+\subsection*{Limitation 3: QR Targets Unobservables, Not the Distribution of $y$}
+
+A more fundamental concern is that the QR M-step estimates quantile parameters
+of the \emph{unobservable} components $\eta_{it}$ and $\varepsilon_{it}$,
+conditional on draws from the posterior $p(\eta \mid y)$.
+It does not directly optimise any criterion involving the distribution of the
+\emph{observed} data $y_{it}$.
+In contrast, MLE maximises the likelihood of $y$, which is a convolution
+\begin{equation}\label{eq:conv}
+f(y_{it} \mid y_{i,t-1}; \theta) = \int f(\eta_{it} \mid \eta_{i,t-1}; \theta_Q)\,
+f_\varepsilon(y_{it} - \eta_{it}; \theta_\varepsilon)\, d\eta_{it}.
+\end{equation}
+In the parametric model we consider, the quantile parameters
+$\theta_Q$ and $\theta_\varepsilon$ jointly determine the density of $y$.
+QR estimates these parameters via moment conditions on the unobservables,
+while MLE uses the full information in the joint density of $y$.
+This distinction becomes particularly relevant under model misspecification:
+QR fits quantiles of $\eta$ and $\varepsilon$ well but may not approximate
+the distribution of $y$ well, whereas MLE directly targets the density of $y$.
+
+We develop this argument formally in the context of our smooth parametric
+model in Section~\ref{sec:identification}.
+
+\subsection*{Our Contributions}
+
+This paper makes three contributions.
+
+\begin{enumerate}
+\item \textbf{Monte Carlo comparisons.}
+  We compare simulated MLE, grid-based MLE, and QR under both the original
+  ABB density and a smooth extension, documenting bias, variance, and RMSE
+  across sample sizes and number of time periods.
+
+\item \textbf{Smooth ABB model.}
+  We propose a $C^2$ cubic spline log-density with Gaussian (quadratic)
+  tails as a direct smooth extension of the AB/ABB quantile framework.
+  The model preserves the quantile-knot interpretation of ABB while
+  ensuring a smooth, everywhere-positive density with analytical gradients
+  and exact normalisation via Taylor series integration.
+
+\item \textbf{Sources of difficulty for MLE.}
+  We identify and analyse several sources of difficulty:
+  (a) the data generation procedure (coarse-grid CDF vs.\ rejection sampling),
+  (b) the gradient computation method (numerical vs.\ analytical),
+  (c) the parameterisation of tail curvature (free vs.\ profiled from IQR),
+  (d) the information structure via the Louis (1982) decomposition, and
+  (e) the connection to deconvolution ill-posedness from the
+  nonparametric identification theory of Hu and Schennach (2008) and
+  Wilhelm (2015).
+\end{enumerate}
+
+The remainder of the paper is organised as follows.
+Section~\ref{sec:abb} reviews the ABB model.
+Section~\ref{sec:mc_abb} presents Monte Carlo evidence comparing MLE and QR
+under the ABB density.
+Section~\ref{sec:smooth} introduces the smooth ABB model.
+Section~\ref{sec:mc_smooth} reports Monte Carlo evidence for the smooth model.
+Section~\ref{sec:identification} analyses identification and information.
+Section~\ref{sec:conclusion} concludes.
+
+%==========================================================================
+\section{The ABB Model}
+\label{sec:abb}
+%==========================================================================
+
+\subsection{Model Setup}
+
+We consider a panel of $N$ individuals observed over $T$ periods.
+The observed outcome is
+\begin{equation}\label{eq:model}
+y_{it} = \eta_{it} + \varepsilon_{it}, \quad i=1,\ldots,N, \quad t=1,\ldots,T,
+\end{equation}
+where $\eta_{it}$ is a persistent component following a first-order Markov
+process and $\varepsilon_{it}$ is an i.i.d.\ transitory shock with zero mean,
+independent of $\eta_{is}$ for all $s$.
+
+The conditional quantile function of $\eta_{it}$ given $\eta_{i,t-1}$ is
+specified as
+\begin{equation}\label{eq:quantile}
+Q_\tau(\eta_{i,t-1}) = \sum_{k=0}^K a_{k}(\tau)\, H_k(\eta_{i,t-1}/\sigma_y),
+\end{equation}
+where $H_k$ are Hermite polynomials and $\tau \in \{\tau_1, \ldots, \tau_L\}$
+is a grid of quantile levels (e.g., $\tau = 0.25, 0.50, 0.75$ for quartiles).
+
+\subsection{Piecewise-Uniform Density with Exponential Tails}
+
+The density implied by the piecewise-linear quantile function is
+piecewise uniform on the intervals $[Q_{\tau_\ell}, Q_{\tau_{\ell+1}})$,
+with exponential tails below $Q_{\tau_1}$ and above $Q_{\tau_L}$.
+The density of $\varepsilon_{it}$ has the same structure.
+
+This density is \emph{discontinuous} at the interior knots.
+Figure~\ref{fig:disc_density} illustrates the density of $\eta_{i1}$
+under the ABB parameterisation, showing the jumps at quantile boundaries.
+
+\textcolor{myred}{[TODO: Insert figure showing piecewise-uniform density
+with discontinuities, and the implied density of $y$ with kinks.]}
+
+\subsection{Parameter Counting}
+
+With $K=2$ (quadratic Hermite basis) and $L=3$ (quartiles), the model has:
+\begin{itemize}
+\item Transition: $a_Q \in \mathbb{R}^{(K+1) \times L} = \mathbb{R}^{3 \times 3}$
+  (9 parameters) plus 2 tail rates $= 11$.
+\item Initial $\eta_1$: 3 quantile knots plus 2 tail rates $= 5$.
+\item Transitory $\varepsilon$: 2 quantile knots (median $=0$) plus 2 tail rates $= 4$.
+\item Total: $11 + 5 + 4 = 20$ parameters.
+\end{itemize}
+
+%==========================================================================
+\section{Performance of SML, MLE, and QR in the ABB Model}
+\label{sec:mc_abb}
+%==========================================================================
+
+\textcolor{myred}{[TODO: This section will contain Monte Carlo comparison results
+for the original ABB (piecewise-uniform) model.
+Simulation design and results to be completed.
+Will include SML, grid-based MLE, and QR comparisons across $N$ and $T$.]}
+
+%==========================================================================
+\section{The Smooth ABB Model}
+\label{sec:smooth}
+%==========================================================================
+
+\subsection{Motivation}
+
+The discontinuities in the ABB density motivate a smooth alternative.
+We seek a model that:
+\begin{enumerate}
+\item preserves the quantile-knot structure of ABB (each inter-quantile
+  segment contains exactly $\tau_{\ell+1} - \tau_\ell$ probability mass);
+\item produces a $C^2$ (twice continuously differentiable) density,
+  enabling gradient-based MLE;
+\item has integrable tails with well-defined curvature; and
+\item connects naturally to the quantile regression interpretation of AB/ABB.
+\end{enumerate}
+
+\subsection{Relationship to Existing Approaches}
+
+Our approach is related to several strands of the density estimation literature.
+
+\subsubsection*{Log-Spline Density Estimation}
+
+The general framework of modelling $\log f(x) = S(x) - \log C$ where $S$ is
+a spline has a long history (e.g., Stone 1990, Kooperberg and Stone 1991).
+Our model is a specific instance with $S$ being a cubic spline on three
+quantile knots, where the knot locations are determined by the quantile
+regression parameters $a_Q$.
+
+\subsubsection*{Gao and Hastie (2022, LinCDE)}
+
+Gao and Hastie (2022) propose conditional density estimation via
+$\log f(z|\mathbf{x}) = \sum_j \theta_j(\mathbf{x}) b_j(z) - c(\theta, \mathbf{x})$,
+where $b_j$ are basis functions and $\theta_j(\mathbf{x})$ are
+covariate-dependent coefficients.
+Our model has this structure: $\mathbf{x} = \eta_{i,t-1}$,
+$z = \eta_{it}$, and the basis functions are the cubic spline evaluated at
+$z$ with knots at $Q_\tau(\eta_{i,t-1})$.
+The coefficients $\theta_j(\eta_{i,t-1})$ are determined by the spline
+values $s_1, s_2, s_3$ which are functions of the quantile knots
+(themselves functions of $\eta_{i,t-1}$ through the Hermite basis).
+
+\subsubsection*{Direct Extension of AB/ABB}
+
+Unlike the general basis-expansion approach, our model is a \emph{direct}
+smoothing of the AB/ABB quantile framework:
+\begin{itemize}
+\item The quantile knots $Q_{\tau_\ell}(\eta_{i,t-1})$ remain the primary
+  parameters, just as in ABB.
+\item The density between knots is determined by a cubic spline
+  (instead of being piecewise uniform), with the constraint that each
+  inter-quantile segment integrates to $\tau_{\ell+1} - \tau_\ell$.
+\item The tails are quadratic in $\log f$ (Gaussian-like decay) instead of
+  linear (exponential), with curvature parameter $\kappa_{\text{mean}}$
+  determined from the inter-quartile range: $\kappa = -1.349^2 / \text{IQR}^2$.
+\item The $C^2$ continuity at the knots is enforced analytically, not by
+  ad hoc blending.
+\end{itemize}
+
+\subsection{Model Specification}
+
+\subsubsection*{Log-Density}
+
+On each segment, the log-density is a cubic polynomial.
+For three quantile knots $t_1 < t_2 < t_3$ with log-density values
+$s_1, s_2, s_3$ (where $s_2 = 0$ by normalisation), the cubic spline
+$S(x)$ satisfies:
+\begin{itemize}
+\item $S(t_\ell) = s_\ell$ for $\ell = 1, 2, 3$ (interpolation),
+\item $S''(t_1^+) = S''(t_1^-)$, $S''(t_3^-) = S''(t_3^+)$ ($C^2$ continuity),
+\item the interior second derivative $M_2 = S''(t_2)$ is determined by
+  the $C^1$ condition at $t_2$.
+\end{itemize}
+
+\subsubsection*{Tails}
+
+The tails are quadratic in $\log f$:
+\begin{align}
+\log f(x) &= s_1 + \beta_L(x - t_1) + \tfrac{1}{2}\kappa_1(x - t_1)^2,
+  \quad x < t_1, \\
+\log f(x) &= s_3 + \beta_R(x - t_3) + \tfrac{1}{2}\kappa_3(x - t_3)^2,
+  \quad x > t_3,
+\end{align}
+where $\beta_L = S'(t_1^+)$, $\beta_R = S'(t_3^-)$ (from $C^1$),
+and $\kappa_1, \kappa_3 < 0$ ensure integrability.
+The curvature parameters are linked via $\kappa_{\text{mean}} = (\kappa_1 + \kappa_3)/2$,
+with the solver finding $\delta = (\kappa_3 - \kappa_1)/2$ to satisfy
+the mass constraints.
+
+\subsubsection*{Mass Constraints and the Newton Solver}
+
+The three mass constraints
+$\int_{\text{segment}_\ell} f(x)\, dx = 0.25$ for $\ell = 1, 2, 3$
+determine $(s_1, s_3, \delta)$ given $(t_1, t_2, t_3, \kappa_{\text{mean}})$.
+These are solved by a $3 \times 3$ Newton iteration.
+The interior integrals $\int \exp(\text{cubic})$ are computed exactly via a
+convergent Taylor series (typically 44 terms).
+
+\subsubsection*{Profiled Parameterisation}
+
+To match the parameter count of QR and eliminate weakly identified tail
+parameters, we profile out $\kappa_{\text{mean}}$ using the IQR:
+$\kappa_{\text{mean}} = -1.349^2 / (t_3 - t_1)^2$.
+The resulting model has 14 parameters:
+9 (transition quantile knots) + 3 (initial quantile knots) + 2 (epsilon quantile knots).
+
+%==========================================================================
+\section{Performance of MLE vs.\ QR in the Smooth ABB Model}
+\label{sec:mc_smooth}
+%==========================================================================
+
+\subsection{Simulation Design}
+
+We generate data from the smooth ABB model with $K = 2$, $\rho = 0.8$,
+$\sigma_v = 0.5$, $\sigma_\varepsilon = 0.3$, $\sigma_{\eta_1} = 1.0$,
+and a small quadratic heterogeneity $d_2 = 0.005$ in the transition quantile
+gaps.
+Data are generated using rejection sampling from the exact model density
+(not grid-based CDF inversion, which we found introduces systematic bias;
+see Section~\ref{sec:identification}).
+Sample size $N = 300$, with 20 Monte Carlo replications.
+
+MLE uses the profiled parameterisation (14 parameters, $\kappa$ from IQR)
+with numerical gradient (adaptive step $h_j = \max(10^{-5}, 10^{-4}|v_j|)$)
+and L-BFGS with BackTracking line search.
+QR uses stochastic EM with 30 iterations and 10 FFBS draws per iteration,
+estimating $\kappa$ from the IQR of the estimated quantiles.
+
+\subsection{Results: $T = 3$}
+
+\begin{table}[H]
+\centering
+\caption{Profiled MLE vs.\ QR, $T = 3$, $N = 300$, 20 replications.}
+\label{tab:profiled_T3}
+\begin{tabular}{lcccccccc}
+\toprule
+ & True & ML bias & ML std & ML RMSE & QR bias & QR std & QR RMSE & QR/ML \\
+\midrule
+$\rho$       & 0.800 & $-$0.001 & 0.036 & 0.036 & $-$0.006 & 0.030 & 0.030 & 0.86 \\
+$a_{\varepsilon,3}$ & 0.202 & $-$0.008 & 0.045 & 0.046 & $+$0.002 & 0.023 & 0.023 & 0.50 \\
+$a_{\text{init}}[1]$ & $-$0.674 & $-$0.026 & 0.101 & 0.105 & $-$0.010 & 0.081 & 0.081 & 0.78 \\
+$a_{\text{init}}[2]$ & 0.000 & $-$0.032 & 0.090 & 0.096 & $-$0.035 & 0.082 & 0.089 & 0.93 \\
+$a_{\text{init}}[3]$ & 0.674 & $-$0.038 & 0.074 & 0.084 & $-$0.042 & 0.088 & 0.098 & \textbf{1.17} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+At $T = 3$, QR dominates MLE for $\rho$ (QR/ML $= 0.86$) and
+$a_{\varepsilon,3}$ (QR/ML $= 0.50$), while MLE is better for $a_{\text{init}}[3]$
+(QR/ML $= 1.17$).
+
+\subsection{Results: $T = 4$}
+
+\begin{table}[H]
+\centering
+\caption{Profiled MLE vs.\ QR, $T = 4$, $N = 300$, 20 replications.}
+\label{tab:profiled_T4}
+\begin{tabular}{lcccccccc}
+\toprule
+ & True & ML bias & ML std & ML RMSE & QR bias & QR std & QR RMSE & QR/ML \\
+\midrule
+$\rho$       & 0.800 & $+$0.002 & 0.029 & 0.029 & $-$0.000 & 0.033 & 0.033 & \textbf{1.16} \\
+$a_{\varepsilon,3}$ & 0.202 & $-$0.012 & 0.041 & 0.043 & $-$0.001 & 0.015 & 0.015 & 0.35 \\
+$a_{\text{init}}[1]$ & $-$0.674 & $-$0.012 & 0.077 & 0.078 & $+$0.002 & 0.070 & 0.070 & 0.89 \\
+$a_{\text{init}}[2]$ & 0.000 & $-$0.013 & 0.078 & 0.079 & $-$0.022 & 0.071 & 0.074 & 0.94 \\
+$a_{\text{init}}[3]$ & 0.674 & $-$0.026 & 0.070 & 0.075 & $-$0.048 & 0.076 & 0.090 & \textbf{1.20} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+At $T = 4$, MLE now dominates QR for $\rho$ (QR/ML $= 1.16$) and continues
+to dominate for $a_{\text{init}}[3]$ (QR/ML $= 1.20$).
+However, QR remains substantially better for $a_{\varepsilon,3}$
+(QR/ML $= 0.35$), and the gap \emph{widens} with more periods.
+
+\textcolor{myred}{[NOTE: These results are preliminary (20 replications, $N = 300$).
+They will be replaced by comprehensive simulation results from HPC
+with larger $N$, more replications, and additional configurations including
+$G \in \{201, 501, 1001\}$.]}
+
+%==========================================================================
+\section{Identification and Information Analysis}
+\label{sec:identification}
+%==========================================================================
+
+\subsection{Local Identification: Information Matrix}
+
+The observed information matrix $I_Y$ characterises the local precision of
+the MLE.
+By the Louis (1982) decomposition,
+\begin{equation}\label{eq:louis}
+I_Y = E[B(X,\theta) \mid Y] - \text{Var}[S(X,\theta) \mid Y]
+    = I_X - I_{X \mid Y},
+\end{equation}
+where $X = (\eta_1, \ldots, \eta_T)$ is the complete data,
+$I_X = E[B \mid Y]$ is the complete-data information (block diagonal in
+$\theta_Q$, $\theta_{\text{init}}$, $\theta_\varepsilon$), and
+$I_{X \mid Y} = \text{Var}[S \mid Y]$ is the missing information from
+not observing $\eta$.
+
+\subsubsection*{Block Diagonal Structure}
+
+The complete-data log-likelihood decomposes as
+\[
+\lambda(X, \theta) = \log f_{\eta_1}(\eta_1; \theta_{\text{init}})
++ \sum_{t=2}^T \log f(\eta_t \mid \eta_{t-1}; \theta_Q)
++ \sum_{t=1}^T \log f_\varepsilon(y_t - \eta_t; \theta_\varepsilon).
+\]
+Since the three components depend on disjoint parameter blocks, the
+complete-data information $I_X = E[B \mid Y]$ is \emph{block diagonal}.
+The cross-parameter correlations in $I_Y$ arise entirely from the missing
+information $I_{X \mid Y} = \text{Var}[S \mid Y]$, which has off-diagonal
+blocks because conditioning on $Y$ induces correlations between the
+scores of different components through the shared latent $\eta$.
+
+\subsubsection*{Eigenvalue Analysis}
+
+We compute $I_Y$ via the SML Hessian ($R = 2000$, $N = 300$, $T = 3$)
+evaluated at the true parameter for the full (17-parameter) model.
+The condition number is $2{,}810$, with all eigenvalues positive.
+Table~\ref{tab:eigenvalues} reports the eigenvalues and their principal
+directions.
+
+\begin{table}[H]
+\centering
+\caption{Eigenvalues of $I_Y$ (SML Hessian, $R = 2000$, $N = 300$, $T = 3$),
+sorted from weakest to strongest identified direction.}
+\label{tab:eigenvalues}
+\begin{tabular}{rll}
+\toprule
+Rank & Eigenvalue & Principal direction \\
+\midrule
+1 & $5.0 \times 10^7$ & $\delta_{L1}$ (left gap intercept) \\
+2 & $5.0 \times 10^7$ & $\delta_{R1}$ (right gap intercept) \\
+3 & $2.4 \times 10^8$ & $\log(-M_\varepsilon)$ (eps curvature) \\
+4--5 & $5.5 \times 10^8$ & $\log(-a_{\varepsilon,1})$, $\log(a_{\varepsilon,3})$ \\
+6 & $7.3 \times 10^8$ & $\log(-M_Q)$ (transition curvature) \\
+7--8 & $1.2 \times 10^9$ & $\delta_{L2}$, $\delta_{R2}$ (gap slopes) \\
+9 & $2.2 \times 10^9$ & $a_{Q,\text{med},1}$ ($\rho$ slope) \\
+10--11 & $9.0 \times 10^9$ & Init gaps \\
+12--17 & $1.4 \times 10^{11}$ & Intercepts, quadratic terms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The weakest directions are the gap intercepts ($\delta_{L1}, \delta_{R1}$),
+which control the IQR of the transition density at $\eta = 0$.
+The curvature parameters ($M_\varepsilon, M_Q$) rank 3rd and 6th ---
+substantially less well identified than the location parameters.
+This is consistent with the simulation finding that MLE has high variance
+for these parameters.
+
+\subsection{Global Identification}
+
+ABB establish nonparametric identification via the hidden Markov structure,
+building on Hu and Schennach (2008) and Wilhelm (2015).
+The key conditions are:
+\begin{enumerate}
+\item \textbf{Completeness}: the conditional expectation operators
+  $\mathcal{L}_{y_2 \mid y_1}$ and $\mathcal{L}_{\eta_2 \mid y_1}$ are injective.
+\item \textbf{Characteristic function non-vanishing}:
+  $\mathcal{F}(s_1)(u) \neq 0$ for all $u \in \mathbb{R}$.
+\end{enumerate}
+These conditions ensure that $f_\varepsilon$ is identified via an ODE in
+Fourier space (equation (S16) in the ABB supplement).
+
+In our parametric model, all parameters are identified (all eigenvalues
+of $I_Y$ are positive).
+However, the identification of shape parameters (curvature, tail decay)
+is achieved through \emph{deconvolution} --- recovering $f_\varepsilon$
+from the convolution $f_y = f_\eta * f_\varepsilon$.
+Deconvolution is an ill-posed inverse problem: high-frequency features
+of $f_\varepsilon$ (such as tail curvature $M_\varepsilon$) are determined
+by ratios of small Fourier coefficients, leading to slow convergence rates.
+
+QR bypasses deconvolution entirely: it draws $\eta$ from the posterior
+via FFBS and estimates $\varepsilon = y - \hat\eta$ directly.
+This gives $\sqrt{N}$ rates for all parameters, whereas MLE's effective
+rate for tail parameters is slower due to the ill-posed inversion.
+
+\subsubsection*{Effect of More Time Periods}
+
+Additional time periods provide more convolution observations, strengthening
+identification.
+Table~\ref{tab:T_comparison} summarises the QR/ML RMSE ratios.
+
+\begin{table}[H]
+\centering
+\caption{QR/ML RMSE ratios by number of time periods (profiled MLE, $N = 300$).
+Values $> 1$ indicate MLE is better.}
+\label{tab:T_comparison}
+\begin{tabular}{lccc}
+\toprule
+Parameter & $T = 3$ & $T = 4$ & Direction \\
+\midrule
+$\rho$ & 0.86 & \textbf{1.16} & MLE improves \\
+$a_{\varepsilon,3}$ & 0.50 & 0.35 & QR advantage widens \\
+$a_{\text{init}}[3]$ & \textbf{1.17} & \textbf{1.20} & MLE consistently better \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+MLE catches up for $\rho$ (the transition slope) as $T$ increases, but
+the epsilon quantile $a_{\varepsilon,3}$ remains challenging.
+This is consistent with the deconvolution interpretation: $\rho$ is
+identified from the autocovariance structure (which improves with $T$),
+while $a_{\varepsilon,3}$ requires separating $f_\varepsilon$ from the
+convolution.
+
+\subsection{Data Generation and Numerical Accuracy}
+
+During the course of this investigation, we identified several sources of
+numerical error that significantly affected MLE performance:
+
+\begin{enumerate}
+\item \textbf{Data generation}: The original \texttt{cspline\_draw} function
+  used a 500-point trapezoidal CDF for inverse sampling, generating data
+  from a density that did not exactly match the model.
+  MLE exploited this misspecification, finding parameter values that fit
+  the discretised data better than the true parameters.
+  QR was unaffected because it estimates from residuals, not the density shape.
+  Replacing with rejection sampling (exact draws from the model density)
+  eliminated this bias.
+
+\item \textbf{Gradient computation}: A fixed finite-difference step
+  $h = 10^{-3}$ was inappropriate for parameters of different scales
+  (e.g., $\log(-M_Q) \approx 1.4$ vs.\ gap $\delta \approx -5.3$).
+  Replacing with adaptive steps $h_j = \max(10^{-5}, 10^{-4}|v_j|)$
+  improved gradient accuracy.
+
+\item \textbf{Tail parameterisation}: When the curvature parameters
+  $M_Q, M_\varepsilon$ were freely estimated, MLE exhibited high variance
+  (std $= 2.4$ for $M_Q$, truth $= -4.0$) and occasional NaN divergence
+  (1/20 replications).
+  Profiling $M$ from the IQR eliminated NaN and reduced variance by
+  40\% for $M_Q$.
+\end{enumerate}
+
+%==========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%==========================================================================
+
+This paper has studied the ABB nonlinear panel data framework from the
+perspective of likelihood-based estimation.
+We find that the original piecewise-uniform density creates fundamental
+obstacles for MLE, and propose a smooth $C^2$ cubic spline extension that
+preserves the quantile interpretation while enabling gradient-based optimisation.
+
+Under correct specification of the smooth model, MLE and QR have complementary
+strengths:
+MLE is more efficient for the transition slope $\rho$ (especially with $T \geq 4$)
+and the upper tail of the initial distribution, while QR is more efficient for
+the transitory shock parameters, particularly the epsilon quantile
+$a_{\varepsilon,3}$.
+The QR advantage for epsilon parameters is consistent with the deconvolution
+interpretation: QR bypasses the ill-posed inverse problem of separating
+$f_\varepsilon$ from the convolution $f_y = f_\eta * f_\varepsilon$ by
+working directly with $\eta$ draws from the posterior.
+
+Several practical findings emerge:
+(i) data generation must use exact sampling (rejection sampling) rather than
+grid-based CDF inversion;
+(ii) the tail curvature parameters $M_Q, M_\varepsilon$ should be profiled
+out (estimated from the IQR) rather than freely optimised;
+(iii) analytical gradients, while requiring substantial implementation effort,
+eliminate NaN divergence and reduce bias.
+
+\textcolor{myred}{[TODO: Add discussion of misspecified density comparison
+(Part 2 of the research plan) and the Louis decomposition results once the
+computation is corrected.]}
+
+\end{document}

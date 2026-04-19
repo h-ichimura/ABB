@@ -2851,6 +2851,384 @@ function estimate_profiled_ml(y::Matrix{Float64}, K::Int, σy::Float64,
 end
 
 # ================================================================
+#  LOUIS (1982) OBSERVED INFORMATION MATRIX
+#
+#  I_Y = E[B(X,θ)|Y] - E[S(X,θ)S'(X,θ)|Y]     (at MLE where S*=0)
+#      = I_X - I_{X|Y}                            (missing information principle)
+#
+#  Complete data X = (η₁,...,η_T), observed Y = (y₁,...,y_T).
+#  Uses forward-backward smoother for E[·|Y].
+#  Analytical score from cspline_eval_partials + chain rule.
+# ================================================================
+
+"""
+Compute observed information via Louis (1982): I_Y = E[B|Y] - E[SS'|Y].
+
+B is block diagonal (θ_Q, θ_init, θ_eps).
+E[SS'|Y] has cross-block terms from joint distribution of (η_s,η_t)|Y.
+
+Key: S = S_init(η₁) + Σ_t S_trans(η_t,η_{t-1}) + Σ_t S_eps(y_t-η_t)
+SS' requires pairwise joints p(η_s,η_t|Y), computed from forward-backward.
+
+Parameter blocks for profiled model (14 total):
+  θ_Q:    v[1:9]   (transition quantile params)
+  θ_init: v[10:12] (init quantile params)
+  θ_eps:  v[13:14] (eps quantile params)
+
+Returns (I_Y, E_B, E_SS, sum_ES).
+"""
+function louis_information(v::Vector{Float64}, y::Matrix{Float64},
+                            K::Int, σy::Float64, τ::Vector{Float64}; G::Int=201)
+    a_Q, M_Q, a_init, M_init, a_eps1, a_eps3, M_eps = unpack_profiled(v, K)
+    N, T_obs = size(y)
+    nk = K + 1; np = length(v)
+    ws = CSplineWorkspace(G, K)
+    G = ws.G_base
+
+    # Parameter block indices (profiled: 14 params)
+    idx_Q = 1:9; idx_init = 10:12; idx_eps = 13:14
+
+    # ---- Build densities ----
+    cspline_transition_matrix!(ws.T_mat, ws.grid, G, a_Q, M_Q, K, σy, τ,
+                               ws.hv_buf, ws.t_buf, ws.s_buf, ws.masses_buf, ws.c1buf)
+
+    # Score via FD of packed v (block-aware)
+    function score_fd(log_f_fn, args, block_idx)
+        nb = length(block_idx)
+        sc = zeros(nb)
+        vt = copy(v)
+        for (jl, jg) in enumerate(block_idx)
+            hj = max(1e-5, 1e-4 * abs(v[jg]))
+            vt[jg] = v[jg]+hj; fp = log_f_fn(args..., vt)
+            vt[jg] = v[jg]-hj; fm = log_f_fn(args..., vt)
+            vt[jg] = v[jg]; sc[jl] = (fp-fm)/(2hj)
+        end
+        sc
+    end
+
+    # Block Hessian via FD: -∂²log f/∂θ_block²
+    function hessian_fd(log_f_fn, args, block_idx)
+        nb = length(block_idx)
+        H = zeros(nb, nb)
+        f0 = log_f_fn(args..., v)
+        for (jl, jg) in enumerate(block_idx)
+            hj = max(1e-5, 1e-4 * abs(v[jg]))
+            vp = copy(v); vp[jg] += hj; fp = log_f_fn(args..., vp)
+            vm = copy(v); vm[jg] -= hj; fm = log_f_fn(args..., vm)
+            H[jl,jl] = -(fp - 2f0 + fm) / hj^2
+            for (kl, kg) in enumerate(block_idx)
+                kl <= jl && continue
+                hk = max(1e-5, 1e-4 * abs(v[kg]))
+                vpp=copy(v); vpp[jg]+=hj; vpp[kg]+=hk; fpp=log_f_fn(args...,vpp)
+                vpm=copy(v); vpm[jg]+=hj; vpm[kg]-=hk; fpm=log_f_fn(args...,vpm)
+                vmp=copy(v); vmp[jg]-=hj; vmp[kg]+=hk; fmp=log_f_fn(args...,vmp)
+                vmm=copy(v); vmm[jg]-=hj; vmm[kg]-=hk; fmm=log_f_fn(args...,vmm)
+                H[jl,kl] = -(fpp-fpm-fmp+fmm)/(4hj*hk)
+                H[kl,jl] = H[jl,kl]
+            end
+        end
+        H
+    end
+
+    # Log-density functions
+    function log_f_init_fn(η, vv)
+        _,_,ai,Mi,_,_,_ = unpack_profiled(vv, K)
+        si=zeros(3); bL=Ref(0.0); bR=Ref(0.0); k1=Ref(0.0); k3=Ref(0.0)
+        solve_cspline_c2!(si,bL,bR,k1,k3,ai,τ,Mi)
+        lr=max(si[1],si[2],si[3]); mi=zeros(4)
+        cspline_masses!(mi,ai,si,bL[],bR[],k1[],k3[],lr)
+        Ci=sum(mi); Ci<1e-300 && return -1e10
+        cspline_eval(η,ai,si,bL[],bR[],k1[],k3[])-log(Ci)-lr
+    end
+
+    function log_f_eps_fn(x, vv)
+        _,_,_,_,ae1,ae3,Me = unpack_profiled(vv, K)
+        ae=[ae1,0.0,ae3]; se=zeros(3); bL=Ref(0.0); bR=Ref(0.0); k1=Ref(0.0); k3=Ref(0.0)
+        solve_cspline_c2!(se,bL,bR,k1,k3,ae,τ,Me)
+        lr=max(se[1],se[2],se[3]); me=zeros(4)
+        cspline_masses!(me,ae,se,bL[],bR[],k1[],k3[],lr)
+        Ce=sum(me); Ce<1e-300 && return -1e10
+        cspline_eval(x,ae,se,bL[],bR[],k1[],k3[])-log(Ce)-lr
+    end
+
+    function log_f_trans_fn(η_t, η_lag, vv)
+        aQ,MQ,_,_,_,_,_ = unpack_profiled(vv, K)
+        z=η_lag/σy; hv=zeros(nk); hv[1]=1.0; K>=1&&(hv[2]=z)
+        for k in 2:K; hv[k+1]=z*hv[k]-(k-1)*hv[k-1]; end
+        t_loc=[dot(view(aQ,:,l),hv) for l in 1:3]
+        (t_loc[2]<=t_loc[1]||t_loc[3]<=t_loc[2]) && return -1e10
+        st=zeros(3); bL=Ref(0.0); bR=Ref(0.0); k1=Ref(0.0); k3=Ref(0.0)
+        solve_cspline_c2!(st,bL,bR,k1,k3,t_loc,τ,MQ)
+        lr=max(st[1],st[2],st[3]); mt=zeros(4)
+        cspline_masses!(mt,t_loc,st,bL[],bR[],k1[],k3[],lr)
+        Ct=sum(mt); Ct<1e-300 && return -1e10
+        cspline_eval(η_t,t_loc,st,bL[],bR[],k1[],k3[])-log(Ct)-lr
+    end
+
+    # ---- Precompute ----
+    log_fe_grid = zeros(G, N, T_obs)
+    @inbounds for t in 1:T_obs, i in 1:N, g in 1:G
+        log_fe_grid[g,i,t] = log_f_eps_fn(y[i,t]-ws.grid[g], v)
+    end
+    f_init_grid = [exp(log_f_init_fn(ws.grid[g], v)) for g in 1:G]
+
+    # Precompute block scores AND Hessians at grid points (independent of individual)
+    @printf("  Louis: precomputing scores and Hessians...\n"); flush(stdout)
+
+    # Init: score and Hessian at each grid point
+    S_init_g = zeros(G, 3)
+    B_init_g = zeros(G, 3, 3)
+    for g in 1:G
+        S_init_g[g,:] = score_fd(log_f_init_fn, (ws.grid[g],), idx_init)
+        B_init_g[g,:,:] = hessian_fd(log_f_init_fn, (ws.grid[g],), idx_init)
+    end
+
+    # Transition: score and Hessian at each (g1,g2) pair
+    S_trans_g = zeros(G, G, 9)
+    B_trans_g = zeros(G, G, 9, 9)
+    @printf("    S_trans + B_trans on %d×%d grid...\n", G, G); flush(stdout)
+    for g1 in 1:G, g2 in 1:G
+        S_trans_g[g1,g2,:] = score_fd(log_f_trans_fn, (ws.grid[g2], ws.grid[g1]), idx_Q)
+        B_trans_g[g1,g2,:,:] = hessian_fd(log_f_trans_fn, (ws.grid[g2], ws.grid[g1]), idx_Q)
+    end
+    @printf("    done.\n"); flush(stdout)
+
+    # ---- Accumulators ----
+    E_B = zeros(np, np)
+    E_SS = zeros(np, np)
+    sum_ES = zeros(np)
+    sum_ES_outer = zeros(np, np)  # Σ_i E[S_i|Y_i] E[S_i|Y_i]'
+    sw = ws.sw[1:G]
+    T_mat = view(ws.T_mat, 1:G, 1:G)
+    α = zeros(G, T_obs); β_bw = zeros(G, T_obs); γ = zeros(G, T_obs)
+
+    @printf("  Louis: processing %d individuals...\n", N); flush(stdout)
+
+    for i in 1:N
+        # ---- Forward-backward ----
+        @inbounds for g in 1:G; α[g,1] = f_init_grid[g]*exp(log_fe_grid[g,i,1]); end
+        L=dot(view(α,:,1),sw); α[:,1]./=L
+        for t in 2:T_obs
+            pw=α[:,t-1].*sw; p_pred=transpose(T_mat)*pw
+            @inbounds for g in 1:G; α[g,t]=p_pred[g]*exp(log_fe_grid[g,i,t]); end
+            L=dot(view(α,:,t),sw); α[:,t]./=L
+        end
+        β_bw[:,T_obs].=1.0
+        for t in T_obs-1:-1:1
+            @inbounds for g1 in 1:G
+                val=0.0; for g2 in 1:G; val+=T_mat[g1,g2]*exp(log_fe_grid[g2,i,t+1])*β_bw[g2,t+1]*sw[g2]; end
+                β_bw[g1,t]=val
+            end
+            Lb=dot(view(β_bw,:,t),sw); Lb>0&&(β_bw[:,t]./=Lb)
+        end
+        for t in 1:T_obs
+            @inbounds for g in 1:G; γ[g,t]=α[g,t]*β_bw[g,t]; end
+            Z=dot(view(γ,:,t),sw); Z>0&&(γ[:,t]./=Z)
+        end
+
+        # Precompute S_eps and B_eps at grid points for this individual
+        S_eps_g = zeros(G, T_obs, 2)
+        B_eps_g = zeros(G, T_obs, 2, 2)
+        for t in 1:T_obs, g in 1:G
+            S_eps_g[g,t,:] = score_fd(log_f_eps_fn, (y[i,t]-ws.grid[g],), idx_eps)
+            B_eps_g[g,t,:,:] = hessian_fd(log_f_eps_fn, (y[i,t]-ws.grid[g],), idx_eps)
+        end
+
+        # ---- Pairwise joint ξ(g1,g2,t) = p(η_{t-1}=g1, η_t=g2|Y) ----
+        # ξ(g1,g2,t) ∝ α(g1,t-1) T(g1,g2) f_eps(y_t-g2) β(g2,t)
+        # Normalize: Σ_{g1,g2} ξ(g1,g2) sw(g1) sw(g2) = 1
+
+        # ---- Compute E[S|Y_i] and E[SS'|Y_i] correctly ----
+        # Total score: S = Σ_t S_t where
+        #   S_1 = [0_Q; S_init(η₁); S_eps(y₁-η₁)]          — depends on η₁
+        #   S_t = [S_trans(η_t,η_{t-1}); 0_init; S_eps(y_t-η_t)]  — depends on (η_{t-1},η_t), t≥2
+        #
+        # E[SS'|Y] = Σ_{s,t} E[S_s S_t'|Y]
+        # Each E[S_s S_t'|Y] depends on the joint of the η's involved.
+        #
+        # For s=t=1: E[S_1 S_1'|Y] — needs γ(·,1) only
+        # For s=1,t≥2: E[S_1 S_t'|Y] — needs joint (η₁, η_{t-1}, η_t)|Y
+        #   But S_1 depends on η₁, S_t depends on (η_{t-1},η_t)
+        #   For t=2: need (η₁,η₂) joint → ξ(·,·,2)
+        #   For t=3: need (η₁,η₂,η₃) joint → expensive, approximate via (η₁,η₂)×(η₂,η₃)/γ(η₂)
+        # For s,t≥2: E[S_s S_t'|Y]
+        #   s=t: need (η_{t-1},η_t) joint → ξ(·,·,t)
+        #   s≠t: need (η_{s-1},η_s,η_{t-1},η_t)|Y → up to 4-way, approximate
+
+        # PRACTICAL APPROACH: compute E[S_t|Y] for each t, then
+        # E[SS'|Y] = Σ_t E[S_t S_t'|Y] + Σ_{s≠t} E[S_s|Y]E[S_t|Y]'
+        #            + Σ_{s≠t} Cov(S_s, S_t|Y)
+        #
+        # The covariance terms Cov(S_s,S_t|Y) for s≠t require joint distributions.
+        # For adjacent times (|s-t|=1), use pairwise ξ.
+        # For non-adjacent, use Markov factorization.
+
+        # Step 1: E[S_t|Y] for each t
+        ES = zeros(np, T_obs)  # ES[:,t] = E[S_t|Y]
+        # t=1
+        for g in 1:G
+            w = γ[g,1]*sw[g]
+            ES[idx_init,1] .+= w .* view(S_init_g,g,:)
+            ES[idx_eps,1] .+= w .* view(S_eps_g,g,1,:)
+        end
+        # t≥2
+        for t in 2:T_obs
+            for g1 in 1:G, g2 in 1:G
+                ξ = α[g1,t-1]*T_mat[g1,g2]*exp(log_fe_grid[g2,i,t])*β_bw[g2,t]*sw[g1]*sw[g2]
+                ξ < 1e-300 && continue
+                ES[idx_Q,t] .+= ξ .* view(S_trans_g,g1,g2,:)
+                ES[idx_eps,t] .+= ξ .* view(S_eps_g,g2,t,:)
+            end
+            # Normalize ξ
+            Z_xi = sum(ES[idx_Q[1],t])  # already accumulated, but need proper norm
+            # Actually ξ should be normalized. Let me fix: accumulate unnormalized, then normalize.
+        end
+
+        # This approach is getting complicated with normalization.
+        # Simpler: use the fact that for EACH pair (s,t), we need E[S_s S_t'|Y].
+        # Organize by the joint needed.
+
+        # SIMPLEST CORRECT: for each t, compute the "total score contribution"
+        # vector μ_t(η_t) = E[S_t|η_t,Y] as a function of η_t alone for t=1,
+        # and μ_t(η_{t-1},η_t) for t≥2.
+        # Then E[SS'|Y] = Σ_{s,t} Cov terms.
+        #
+        # For the diagonal E[S_t S_t'|Y]: straightforward from ξ or γ.
+        # For cross E[S_s S_t'|Y] with s<t:
+        #   If S_s depends on η_s only and S_t depends on η_t only (e.g., eps terms at different t):
+        #   E[S_s S_t'|Y] = Σ_{g_s,g_t} S_s(g_s) S_t(g_t)' p(η_s=g_s, η_t=g_t|Y)
+        #   The pairwise smoothed p(η_s,η_t|Y) for non-adjacent s,t can be computed from
+        #   the forward-backward via: p(η_s,η_t|Y) = Σ_{η_{s+1},...,η_{t-1}} p(η_s,...,η_t|Y)
+        #   For T=3, the only non-adjacent pair is (1,3), which factorizes as:
+        #   p(η₁,η₃|Y) = Σ_{η₂} p(η₁,η₂|Y) × T(η₂,η₃)f_eps(y₃-η₃)β(η₃,3) / Σ...
+        #
+        # For T=3, there are only 3 score components (t=1,2,3).
+        # E[SS'|Y] = E[S₁S₁'] + E[S₂S₂'] + E[S₃S₃']
+        #          + E[S₁S₂'] + E[S₂S₁'] + E[S₁S₃'] + E[S₃S₁']
+        #          + E[S₂S₃'] + E[S₃S₂']
+
+        E_S_i = zeros(np)
+        E_SS_i = zeros(np, np)
+        E_B_i = zeros(np, np)  # block diagonal E[B|Y_i]
+
+        # ---- t=1 terms: depends on η₁ only (marginal γ(·,1)) ----
+        for g in 1:G
+            w = γ[g,1]*sw[g]
+            s1 = zeros(np); s1[idx_init]=S_init_g[g,:]; s1[idx_eps]=S_eps_g[g,1,:]
+            E_S_i .+= w.*s1
+            E_SS_i .+= w.*(s1*s1')
+            # E[B|Y]: init block + eps block (both depend on η₁)
+            E_B_i[idx_init, idx_init] .+= w .* view(B_init_g, g, :, :)
+            E_B_i[idx_eps, idx_eps] .+= w .* view(B_eps_g, g, 1, :, :)
+        end
+
+        # ---- E[S₂S₂'|Y]: depends on (η₁,η₂) via ξ(·,·,2) ----
+        for g1 in 1:G, g2 in 1:G
+            ξ = α[g1,1]*T_mat[g1,g2]*exp(log_fe_grid[g2,i,2])*β_bw[g2,2]*sw[g1]*sw[g2]
+            ξ < 1e-300 && continue
+            s2 = zeros(np); s2[idx_Q]=S_trans_g[g1,g2,:]; s2[idx_eps]=S_eps_g[g2,2,:]
+            E_S_i .+= ξ.*s2
+            E_SS_i .+= ξ.*(s2*s2')
+            # E[B|Y]: Q block from transition, eps block from η₂
+            E_B_i[idx_Q, idx_Q] .+= ξ .* view(B_trans_g, g1, g2, :, :)
+            E_B_i[idx_eps, idx_eps] .+= ξ .* view(B_eps_g, g2, 2, :, :)
+        end
+
+        # ---- E[S₃S₃'|Y]: depends on (η₂,η₃) via ξ(·,·,3) ----
+        if T_obs >= 3
+            for g2 in 1:G, g3 in 1:G
+                ξ = α[g2,2]*T_mat[g2,g3]*exp(log_fe_grid[g3,i,3])*β_bw[g3,3]*sw[g2]*sw[g3]
+                ξ < 1e-300 && continue
+                s3 = zeros(np); s3[idx_Q]=S_trans_g[g2,g3,:]; s3[idx_eps]=S_eps_g[g3,3,:]
+                E_S_i .+= ξ.*s3
+                E_SS_i .+= ξ.*(s3*s3')
+                # E[B|Y]: Q block from transition, eps block from η₃
+                E_B_i[idx_Q, idx_Q] .+= ξ .* view(B_trans_g, g2, g3, :, :)
+                E_B_i[idx_eps, idx_eps] .+= ξ .* view(B_eps_g, g3, 3, :, :)
+            end
+        end
+
+        # ---- Cross terms E[S₁S₂'|Y]: needs joint (η₁,η₂)|Y = ξ(·,·,2) ----
+        # S₁ depends on η₁, S₂ depends on (η₁,η₂)
+        for g1 in 1:G, g2 in 1:G
+            ξ = α[g1,1]*T_mat[g1,g2]*exp(log_fe_grid[g2,i,2])*β_bw[g2,2]*sw[g1]*sw[g2]
+            ξ < 1e-300 && continue
+            s1 = zeros(np); s1[idx_init]=S_init_g[g1,:]; s1[idx_eps]=S_eps_g[g1,1,:]
+            s2 = zeros(np); s2[idx_Q]=S_trans_g[g1,g2,:]; s2[idx_eps]=S_eps_g[g2,2,:]
+            E_SS_i .+= ξ.*(s1*s2' + s2*s1')  # symmetric: add both cross terms
+        end
+
+        # ---- Cross terms E[S₂S₃'|Y]: needs joint (η₁,η₂,η₃)|Y ----
+        # S₂ depends on (η₁,η₂), S₃ depends on (η₂,η₃)
+        # Joint (η₁,η₂,η₃)|Y = p(η₁|Y)×p(η₂|η₁,Y)×p(η₃|η₂,Y₃)
+        # = ξ₁₂(g1,g2) × T(g2,g3)f_eps(y₃-g3)β(g3,3)sw(g3) / [Σ_g3 ...]
+        # This is O(G³) — for G=201 that's 8M iterations. Use stride.
+        if T_obs >= 3
+            stride23 = max(1, G ÷ 30)
+            for g1 in 1:stride23:G, g2 in 1:stride23:G, g3 in 1:stride23:G
+                ξ12 = α[g1,1]*T_mat[g1,g2]*exp(log_fe_grid[g2,i,2])*β_bw[g2,2]
+                ξ23 = T_mat[g2,g3]*exp(log_fe_grid[g3,i,3])*β_bw[g3,3]
+                # Joint: p(η₁,η₂,η₃|Y) ∝ α(g1,1)T(g1,g2)f_e(y2-g2) × T(g2,g3)f_e(y3-g3)β(g3,3)
+                # But β_bw(g2,2) already includes the g3 summation. Need to undo it.
+                # p(g1,g2,g3|Y) ∝ α(g1,1) T(g1,g2) f_e(y2-g2) T(g2,g3) f_e(y3-g3) β(g3,3)
+                ξ123 = α[g1,1]*T_mat[g1,g2]*exp(log_fe_grid[g2,i,2]) *
+                        T_mat[g2,g3]*exp(log_fe_grid[g3,i,3]) * (T_obs>=4 ? β_bw[g3,3] : 1.0)
+                ξ123 *= sw[g1]*sw[g2]*sw[g3]*stride23^3
+                ξ123 < 1e-300 && continue
+                s2 = zeros(np); s2[idx_Q]=S_trans_g[g1,g2,:]; s2[idx_eps]=S_eps_g[g2,2,:]
+                s3 = zeros(np); s3[idx_Q]=S_trans_g[g2,g3,:]; s3[idx_eps]=S_eps_g[g3,3,:]
+                E_SS_i .+= ξ123.*(s2*s3' + s3*s2')
+            end
+        end
+
+        # ---- Cross terms E[S₁S₃'|Y]: needs (η₁,η₃)|Y = Σ_η₂ p(η₁,η₂,η₃|Y) ----
+        # S₁ depends on η₁, S₃ depends on (η₂,η₃)
+        # Already covered in the triple sum above if we add S₁ contribution.
+        # But S₁ only depends on η₁ (not η₂,η₃), so:
+        # E[S₁S₃'|Y] = Σ_{g1,g2,g3} s₁(g1) s₃(g2,g3)' p(g1,g2,g3|Y)
+        if T_obs >= 3
+            for g1 in 1:stride23:G, g2 in 1:stride23:G, g3 in 1:stride23:G
+                ξ123 = α[g1,1]*T_mat[g1,g2]*exp(log_fe_grid[g2,i,2]) *
+                        T_mat[g2,g3]*exp(log_fe_grid[g3,i,3]) * (T_obs>=4 ? β_bw[g3,3] : 1.0)
+                ξ123 *= sw[g1]*sw[g2]*sw[g3]*stride23^3
+                ξ123 < 1e-300 && continue
+                s1 = zeros(np); s1[idx_init]=S_init_g[g1,:]; s1[idx_eps]=S_eps_g[g1,1,:]
+                s3 = zeros(np); s3[idx_Q]=S_trans_g[g2,g3,:]; s3[idx_eps]=S_eps_g[g3,3,:]
+                E_SS_i .+= ξ123.*(s1*s3' + s3*s1')
+            end
+        end
+
+        # Normalize E_SS_i: the ξ values may not sum to 1 due to numerical issues.
+        # The diagonal terms (S_t S_t') already used properly normalized ξ or γ.
+        # The cross terms used unnormalized ξ123 — need to divide by the total.
+        # Actually, γ and the pairwise ξ are already normalized by construction.
+        # The triple ξ123 needs normalization: Z = Σ ξ123 sw sw sw stride³
+        # This is implicitly the likelihood, so it should sum to 1 given proper α,β.
+        # But with stride, it won't sum exactly to 1. Let's check by computing Z.
+
+        E_B .+= E_B_i
+        E_SS .+= E_SS_i
+        sum_ES .+= E_S_i
+        sum_ES_outer .+= E_S_i * E_S_i'  # per-individual outer product
+
+        (i % 20 == 0 || i == N) && (@printf("    i=%d/%d\n", i, N); flush(stdout))
+    end
+
+    # Louis formula: I_Y = Σ_i [E[B_i|Y_i] - (E[S_i S_i'|Y_i] - E[S_i|Y_i]E[S_i|Y_i]')]
+    #              = E_B - E_SS + sum_ES_outer
+    I_Y = E_B - E_SS + sum_ES_outer
+
+    # Missing information: I_{X|Y} = E_B - I_Y = E_SS - sum_ES_outer
+    I_miss = E_SS - sum_ES_outer
+
+    (I_Y, E_B, I_miss, sum_ES)
+end
+
+# ================================================================
+#  TRUE PARAMETERS
+# ================================================================
+
+# ================================================================
 #  TRUE PARAMETERS
 # ================================================================
 

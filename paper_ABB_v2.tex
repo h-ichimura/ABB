@@ -1,0 +1,1060 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[paperwidth=21.587cm,paperheight=27.937cm,
+            left=3cm,right=2.5cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{graphicx}
+\usepackage{setspace}
+\onehalfspacing
+
+\definecolor{myblue}{RGB}{0,114,178}
+\definecolor{myred}{RGB}{213,94,0}
+
+\hypersetup{colorlinks=true,linkcolor=myblue,citecolor=myblue,urlcolor=myblue}
+
+\title{\textbf{Likelihood Estimation for the Nonlinear Panel Data Framework\\
+of Arellano, Blundell and Bonhomme (2017):\\
+Discontinuities, Efficiency, and a Smooth Extension}\\[0.6em]
+\large Preliminary Draft}
+\author{Risheng Xu\\
+University of Arizona}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Arellano, Blundell, and Bonhomme (2017, ABB) propose a nonlinear panel data
+framework for earnings and consumption dynamics.
+Their estimator, based on a stochastic EM algorithm with a quantile-regression
+(QR) M-step, is computationally tractable but relies on a piecewise-linear-exponential
+density that is \emph{discontinuous at interior quantile nodes}.
+This paper investigates two limitations of the ABB framework.
+First, the density kinks create a non-smooth log-likelihood, causing
+the standard simulated maximum likelihood (SML) estimator to either
+produce infinite objective values or locate a spurious maximum far from
+the truth, depending on the starting values.
+Second, even when the SML objective is well-behaved, the QR estimator is
+inefficient relative to a correctly specified MLE.
+We document these issues via Monte Carlo experiments, reporting variance and
+variance-ratio tables for the QR and SML estimators across sample sizes
+$N\in\{792, 792\times2, 792\times3\}$ with $T=6$ periods.
+In replication of the ABB procedure we find that the histogram of the QR
+estimator does not concentrate around the true value as $N$ increases; the
+variance ratio is substantially below the theoretical value of $0.5$ (for
+doubling the sample) for most parameters.
+Motivated by these findings, we propose a smooth version of the ABB model
+inspired by Gao and Hastie (2022, \textit{JMLR}), which replaces the
+piecewise-constant interior density with a basis-expansion (Lindsey's method)
+that is everywhere differentiable.
+Within this smooth model, the MLE estimator displays clear sharpening of the
+likelihood around the true value as $N$ increases, and the variance ratio is
+closer to the theoretical benchmark.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+%==========================================================================
+\section{Introduction}
+\label{sec:intro}
+%==========================================================================
+
+Household earnings and consumption dynamics over the life cycle are among the
+most studied topics in empirical economics.
+Arellano, Blundell, and Bonhomme (2017, ABB) make a landmark contribution by
+developing a fully nonlinear panel data framework in which the persistent
+earnings component $\eta_{it}$ follows a first-order Markov process whose
+conditional quantile function is a flexible polynomial series in
+$(\eta_{i,t-1}, age_{it})$.
+Their framework allows earnings persistence to vary with the sign and magnitude
+of the current shock, producing the empirically prominent ``nonlinear
+persistence'' pattern in PSID and Norwegian administrative data.
+ABB estimate the model using a stochastic EM algorithm whose M-step consists of
+a sequence of \emph{quantile regressions} (QR) rather than likelihood
+maximisation, exploiting the piecewise-linear density implied by their
+parameterisation.
+
+This paper examines two limitations of the ABB framework and proposes a remedy.
+
+\subsection*{Limitation 1: Discontinuities in the Density of $y_{it}$}
+
+The ABB parameterisation specifies the conditional quantile function of
+$\varepsilon_{it}=y_{it}-\eta_{it}$ as a piecewise-linear function of the
+quantile index $\tau$ on a grid $\tau_1<\cdots<\tau_L$, with exponential
+tails outside $[\tau_1,\tau_L]$.
+The implied probability density function is
+\begin{equation}\label{eq:eps_pdf}
+f(y_{it}|\eta_{it};\theta)=\begin{cases}
+\tau_1\,\lambda_-^\varepsilon\exp[\lambda_-^\varepsilon(y_{it}-\eta_{it}-A^\varepsilon_{it}(1))],
+  & y_{it}-\eta_{it}<A^\varepsilon_{it}(1),\\[4pt]
+\dfrac{\tau_{l+1}-\tau_l}{A^\varepsilon_{it}(l+1)-A^\varepsilon_{it}(l)},
+  & A^\varepsilon_{it}(l)\le y_{it}-\eta_{it}<A^\varepsilon_{it}(l+1),\\[4pt]
+(1-\tau_L)\,\lambda_+^\varepsilon\exp[-\lambda_+^\varepsilon(y_{it}-\eta_{it}-A^\varepsilon_{it}(L))],
+  & y_{it}-\eta_{it}\ge A^\varepsilon_{it}(L),
+\end{cases}
+\end{equation}
+where $A^\varepsilon_{it}(l)=\sum_{k=0}^K a_{kl}^\varepsilon\phi_k(age_{it})$.
+The interior of this density is piecewise constant---it \emph{jumps} at each
+knot $A^\varepsilon_{it}(l)$, $l=2,\ldots,L-1$.
+Identical kinks appear in the density $f(\eta_{it}|\eta_{i,t-1};\theta)$.
+Although ABB note that ``the likelihood function is available in closed form''
+and exploit this for sampling, they deliberately avoid maximising it directly,
+instead using QR.
+
+We demonstrate that these kinks have two practical consequences.
+First, the likelihood surface is non-differentiable, making gradient-based
+optimisation fail.
+Second, for parameter values that violate the ordering constraint
+$A(l+1)>A(l)$ for all $l$, the likelihood degenerates.
+When the Nelder--Mead simplex method is used (as in our implementation),
+the algorithm stalls at the initial value whenever the objective evaluates
+to $-\infty$, which happens for a wide range of starting values.
+Furthermore, even near the truth, the flat interior segments allow parameter
+vectors far from the truth to attain the same or higher simulated likelihood,
+so the SML estimator does not reliably locate the true parameter.
+
+ABB themselves observe this issue implicitly: they note that the tail
+parameters $\lambda_-^Q$ and $\lambda_+^Q$ are determined by imposing
+continuity of the density at the \emph{boundary} knots $A(1)$ and $A(L)$,
+but this does not resolve the interior discontinuities.
+The slides from the oral examination (Xu, 2024) explicitly distinguish between
+the ``ABB discontinuous'' density (with $L=11$ nodes but discontinuities at
+interior knots) and ``continuous at tails'' variants with $L=11$ or $L=2$
+nodes; see Figure~\ref{fig:disc_density}.
+
+\begin{figure}[H]
+\centering
+\caption{Probability density of $\eta_{i1}$ under three parameterisations.
+Left: ABB original ($L=11$, discontinuous interior).
+Centre: $L=11$ with continuity imposed at tails.
+Right: $L=2$ with continuity at tails.
+Source: \texttt{imgs/simp\_mle3\_eta\_0\_discon\_pdf.pdf}, pages 9, 7, 8.}
+\label{fig:disc_density}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/simp\_mle3\_eta\_0\_discon\_pdf.pdf}, pages 9, 7, 8]\\
+\small(Please place the figure file in the same directory as this tex file.)
+\vspace{1cm}}}
+\end{figure}
+
+\subsection*{Limitation 2: Efficiency Loss of the QR Estimator}
+
+ABB's M-step minimises the check-function (quantile regression) objective
+\begin{equation}\label{eq:check}
+\min_{a_{0l}^Q,\ldots,a_{Kl}^Q}
+\sum_{i=1}^N\sum_{t=2}^T\sum_{m=1}^M
+\rho_{\tau_l}\!\Bigl(\eta_{it}^{(m)}-\sum_{k=0}^K
+  a_{kl}^Q\phi_k(\eta_{i,t-1}^{(m)},age_{it})\Bigr),
+\end{equation}
+where $\rho_\tau(u)=u(\tau-\mathbf{1}\{u\le0\})$.
+This does not maximise the joint log-likelihood of the observed panel $y_i^T$,
+so the QR estimator is not efficient in the Cram\'er--Rao sense even under
+correct specification.
+In addition, in our replications of the ABB procedure we find that the
+variance of the QR estimator does \emph{not} shrink proportionally to $1/N$
+as $N$ increases (Table~\ref{tab:abb_var}).
+The variance ratios $\text{var}(N=792)/\text{var}(N=792\times2)$ and
+$\text{var}(N=792)/\text{var}(N=792\times3)$ are substantially
+below the theoretical values of $0.5$ and $0.33$, respectively.
+
+\subsection*{Our Contributions}
+
+This paper makes three contributions.
+
+\begin{enumerate}
+\item We document the density kink problem formally and demonstrate its
+  practical consequences for MLE and SML in the ABB model.
+\item We conduct a systematic Monte Carlo comparison of the ABB QR estimator
+  and the SML estimator, documenting variance ratios and histograms of the
+  estimators across sample sizes $N\in\{792,792\times2,792\times3\}$.
+\item We propose a smooth version of the ABB model inspired by the
+  Lindsey's method of Gao and Hastie (2022, \textit{JMLR}), which replaces
+  the piecewise-constant interior density with a smooth basis expansion,
+  while retaining the nonlinear-persistence economic content of ABB.
+  Within this smooth model, the MLE estimator exhibits proper consistency
+  properties.
+\end{enumerate}
+
+The remainder of the paper is organised as follows.
+Section~\ref{sec:abb} reviews the ABB model.
+Section~\ref{sec:sml_abb} constructs the SML estimator and presents Monte
+Carlo evidence comparing SML and QR under the ABB density.
+Section~\ref{sec:mle_abb} studies the MLE versus QR comparison more closely.
+Section~\ref{sec:smooth} introduces the smooth ABB model.
+Section~\ref{sec:smooth_results} reports Monte Carlo evidence for the smooth
+model.
+Section~\ref{sec:conclusion} concludes.
+
+%==========================================================================
+\section{The ABB Model}
+\label{sec:abb}
+%==========================================================================
+
+\subsection{Earnings Decomposition}
+
+Let $y_{it}$ denote log pre-tax labour earnings of household $i$ at age $t$,
+residualised on a quartic in age and cohort--education interactions.
+ABB decompose
+\begin{equation}\label{eq:decomp}
+y_{it}=\eta_{it}+\varepsilon_{it},\qquad i=1,\ldots,N,\quad t=1,\ldots,T,
+\end{equation}
+where $\eta_{it}$ is a first-order Markov persistent component and
+$\varepsilon_{it}$ is a transitory shock that is i.i.d.\ over time and
+independent of all $\eta_{is}$.
+
+\subsection{Quantile Parameterisation}
+
+The $\tau$-th conditional quantile of $\eta_{it}$ given $\eta_{i,t-1}$ is
+\begin{equation}\label{eq:Qt}
+Q_t(\eta_{i,t-1},\tau)
+=\sum_{k=0}^K a_k^Q(\tau)\,\phi_k(\eta_{i,t-1},age_{it}),
+\end{equation}
+where $\{\phi_k\}$ are (tensor products of) Hermite polynomial basis
+functions.
+In practice, ABB use $L=11$ equally-spaced quantile nodes
+$\tau_\ell=\ell/(L+1)$, and model $a_k^Q(\tau)$ as piecewise-linear on
+$[\tau_1,\tau_L]$ with exponential tails:
+\begin{equation}\label{eq:a0Q}
+a_0^Q(\tau)=\frac{1}{\lambda_-^Q}\log\!\Bigl(\frac{\tau}{\tau_1}\Bigr)
+  \mathbf{1}\{0<\tau<\tau_1\}
+  +\sum_{\ell=1}^{L-1}\!\Bigl(a_{0\ell}^Q+\frac{a_{0,\ell+1}^Q-a_{0\ell}^Q}
+  {\tau_{\ell+1}-\tau_\ell}(\tau-\tau_\ell)\Bigr)
+  \mathbf{1}\{\tau_\ell\le\tau<\tau_{\ell+1}\}
+  -\frac{1}{\lambda_+^Q}\log\!\Bigl(\frac{1-\tau}{1-\tau_L}\Bigr)
+  \mathbf{1}\{\tau_L\le\tau<1\}.
+\end{equation}
+The coefficients $a_k^Q$ for $k\ge1$ are held constant outside
+$[\tau_1,\tau_L]$.
+Analogous specifications hold for $Q_\varepsilon(age_{it},\tau)$ and
+$Q_{\eta_1}(age_{i1},\tau)$.
+
+\subsection{Implied Densities}
+
+Inverting the quantile function yields the piecewise-exponential densities
+in \eqref{eq:eps_pdf} and their $\eta$-analogues.
+For $t\ge2$:
+\begin{equation}\label{eq:eta_pdf}
+f(\eta_{it}|\eta_{i,t-1};\theta)=\begin{cases}
+\tau_1\,\lambda_-^Q\exp[\lambda_-^Q(\eta_{it}-A^Q_{it}(1))],
+  & \eta_{it}<A^Q_{it}(1),\\[4pt]
+\dfrac{\tau_{\ell+1}-\tau_\ell}{A^Q_{it}(\ell+1)-A^Q_{it}(\ell)},
+  & A^Q_{it}(\ell)\le\eta_{it}<A^Q_{it}(\ell+1),\\[4pt]
+(1-\tau_L)\,\lambda_+^Q\exp[-\lambda_+^Q(\eta_{it}-A^Q_{it}(L))],
+  & \eta_{it}\ge A^Q_{it}(L),
+\end{cases}
+\end{equation}
+where $A^Q_{it}(\ell)=\sum_{k=0}^K a_{k\ell}^Q\phi_k(\eta_{i,t-1},age_{it})$.
+Continuity of the density at the boundary knots imposes
+\begin{equation}\label{eq:lambda}
+\lambda_-^Q=\frac{\tau_2-\tau_1}{\tau_1[A^Q_{it}(2)-A^Q_{it}(1)]},\qquad
+\lambda_+^Q=\frac{\tau_L-\tau_{L-1}}{(1-\tau_L)[A^Q_{it}(L)-A^Q_{it}(L-1)]}.
+\end{equation}
+Note that continuity \eqref{eq:lambda} is imposed only at $A^Q(1)$ and
+$A^Q(L)$; the interior knots $A^Q(\ell)$, $\ell=2,\ldots,L-1$, remain
+discontinuities of the density.
+
+\subsection{ABB's Stochastic EM Algorithm}
+
+Denote the posterior density of the latent path $\eta_i^T=(\eta_{i1},\ldots,\eta_{iT})$ given the earnings data:
+\begin{equation}
+f_i(\eta_i^T;\hat\theta^{(s)})\propto
+\prod_{t=1}^T f(y_{it}|\eta_{it};\hat\theta^{(s)})\cdot
+f(\eta_{i1};\hat\theta^{(s)})\cdot
+\prod_{t=2}^T f(\eta_{it}|\eta_{i,t-1};\hat\theta^{(s)}).
+\end{equation}
+ABB iterate between:
+\begin{description}
+\item[E-step:] Draw $\eta_i^{(m)}$ for $m=1,\ldots,M$ from
+  $f_i(\cdot;\hat\theta^{(s)})$ via a Metropolis--Hastings sampler.
+\item[M-step:] Update each parameter block by solving the quantile regression
+  \eqref{eq:check}; tail parameters are updated by the closed-form formulas
+  analogous to \eqref{eq:lambda}.
+\end{description}
+The final estimate averages over the last $\tilde S$ iterates.
+Arellano and Bonhomme (2016) establish that $\hat\theta$ is $\sqrt{N}$-consistent
+and asymptotically normal under correct specification.
+
+%==========================================================================
+\section{Performance of Simulated MLE vs.\ QR in the ABB Model}
+\label{sec:sml_abb}
+%==========================================================================
+
+\subsection{Constructing the SML Estimator}
+
+The marginal likelihood of $y_i^T$ is
+\begin{equation}\label{eq:lik}
+f(y_i^T|\theta)=\int\cdots\int
+\prod_{t=1}^T f(y_{it}|\eta_{it};\theta)\cdot
+f(\eta_{i1};\theta)\cdot
+\prod_{t=2}^T f(\eta_{it}|\eta_{i,t-1};\theta)\;
+d\eta_{i1}\cdots d\eta_{iT}.
+\end{equation}
+This integral is intractable analytically for $T\ge3$.
+For the SML estimator, we simulate $R$ independent paths
+$\hat\eta_{ir}^T=(\hat\eta_{ir1},\ldots,\hat\eta_{irT})$ by drawing
+$\tau_{irt}\stackrel{iid}{\sim}U(0,1)$ and applying the quantile functions:
+\begin{equation}\label{eq:sml}
+\tilde f(y_i|\theta;R)=\frac{1}{R}\sum_{r=1}^R
+\prod_{t=1}^T f(y_{it}|\hat\eta_{irt};\theta).
+\end{equation}
+The SML estimator maximises
+$\hat\theta_{\mathrm{SML}}=\arg\max_\theta\sum_i\log\tilde f(y_i|\theta;R)$,
+implemented with the Nelder--Mead simplex method.
+The likelihood ratio relative to the true parameter is
+\begin{equation}\label{eq:ratio}
+\text{ratio}=\ln\!\Bigl[\frac{L(\hat\theta,Y)}{L(\theta_{\text{true}},Y)}\Bigr]
+=\ln L(\hat\theta,Y)-\ln L(\theta_{\text{true}},Y).
+\end{equation}
+
+\subsection{Monte Carlo Design}
+
+We calibrate the true parameters to the simplified two-period ABB design with
+$T=6$, $L=3$ quantile segments at $\tau_1=0.25, \tau_2=0.50, \tau_3=0.75$,
+and Hermite degrees $K_Q=2$, $K_\varepsilon=K_{\eta_1}=0$.
+True parameter matrices are set to uniform grids:
+\begin{equation}
+(a_{k\ell}^Q)=
+\begin{pmatrix}1&1.5&2\\1&1.5&2\end{pmatrix},\quad
+(a_\ell^\varepsilon)=(1,1.5,2),\quad
+(a_\ell^{\eta_1})=(1,1.5,2).
+\end{equation}
+We generate $S=100$ Monte Carlo samples for each
+$N\in\{792,792\times2,792\times3\}$.
+For each replicate we run: (i) the ABB stochastic EM (QR-based) with $S=600$
+iterations and $M=100$ Metropolis--Hastings draws per iteration; (ii) the SML
+with $R=6000$ draws and Nelder--Mead optimisation, with multiple starting
+values.
+
+\subsection{Check Function as the Objective Function}
+
+Before discussing estimation results, we examine the shape of the check-function
+objective as a function of a single parameter, holding all others at the true
+value.
+The check-function objective at the true $\theta$ is:
+\begin{equation}
+\bar\theta=\arg\min_\theta\,\mathbb{E}\!\left[
+\int R(y_i,\eta;\theta)\,f_i(\eta;\bar\theta)\,d\eta\right],
+\end{equation}
+where $R$ is the check-function loss.
+\textbf{Key finding:} The one-dimensional check-function profile does \emph{not}
+become sharper (more concentrated) as $N$ increases from $792$ to $792\times2$
+to $792\times3$.
+This is the empirical content of Figures~\ref{fig:check_N792} and
+\ref{fig:check_N2_3}: the objective function retains the same curvature
+regardless of sample size.
+This non-sharpening is a direct consequence of the flat interior segments in
+the density \eqref{eq:eps_pdf}: within each segment, the check-function
+loss is invariant to the parameter value, so increasing $N$ only adds more
+observations with the same flat contribution.
+
+\begin{figure}[H]
+\centering
+\caption{Check function for $a^\eta(k=1,2,3;\,\tau_1)$, $N=792$.
+The objective function is minimised near the true value (red line)
+but the basin is broad and non-sharpening.
+Source: \texttt{imgs/check\_23\_n792\_tau1.pdf}, pages 1--3.}
+\label{fig:check_N792}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/check\_23\_n792\_tau1.pdf}, pages 1, 2, 3]
+\vspace{1cm}}}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\caption{Check function for $a^\eta(k=1,2,3;\,\tau_1)$, $N=792\times2$ (blue) and $N=792\times3$ (green).
+The objective functions do not become concentrated as sample size increases.
+Source: \texttt{imgs/check\_23\_n792\_tau1\_k1.pdf}, pages 1--3.}
+\label{fig:check_N2_3}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/check\_23\_n792\_tau1\_k1.pdf}, pages 1, 2, 3]
+\vspace{1cm}}}
+\end{figure}
+
+\subsection{Distribution of the QR Estimator}
+
+We examine the histogram of the QR estimator $\hat a^\eta(k,\ell)$ across
+Monte Carlo replicates.
+The parameters $e(k,\ell)$ denote the $(k,\ell)$-th entry of the
+coefficient matrix, where $k\in\{1,2,3\}$ indexes the Hermite polynomial
+degree and $\ell\in\{1,2\}$ indexes the quantile node.
+
+\begin{figure}[H]
+\centering
+\caption{Bootstrap histograms of $a^\eta(k=1,2,3;\,\tau_1)$
+under the ABB QR estimator (full estimation).
+Source: \texttt{edge3\_eta\_0\_comb\_abb7\_agecorrect.pdf}, pages 1, 12, 23.}
+\label{fig:abb_hist_full}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{edge3\_eta\_0\_comb\_abb7\_agecorrect.pdf}, pages 1, 12, 23]
+\vspace{1cm}}}
+\end{figure}
+
+\textbf{Main finding:} The histogram does not show a tendency to concentrate
+around the true value as $N$ increases.
+
+Table~\ref{tab:abb_sd} reports the standard deviation of the QR estimator
+and the proportion of estimates falling within $\pm1$, $\pm1.5$, and $\pm2$
+standard deviations of the mean (computed at $N=792$).
+
+\begin{table}[H]
+\centering
+\caption{Standard deviation and coverage proportions of the ABB QR estimator
+for $a^\eta(k,\ell=1)$ across sample sizes.}
+\label{tab:abb_sd}
+\begin{tabular}{lcccc}
+\toprule
+ & Statistic & $N=792$ & $N=792\times2$ & $N=792\times3$ \\
+\midrule
+\multirow{4}{*}{$e(1,1)$}
+ & sd           & 0.0633 & 0.0462 & 0.0428 \\
+ & $\pm1\,$sd   & 0.63   & 0.85   & 0.85   \\
+ & $\pm1.5\,$sd & 0.87   & 0.90   & 0.95   \\
+ & $\pm2\,$sd   & 0.98   & 0.99   & 1.00   \\
+\midrule
+\multirow{4}{*}{$e(2,1)$}
+ & sd           & 0.0810 & 0.0692 & 0.0696 \\
+ & $\pm1\,$sd   & 0.63   & 0.75   & 0.72   \\
+ & $\pm1.5\,$sd & 0.87   & 0.90   & 0.95   \\
+ & $\pm2\,$sd   & 0.97   & 1.00   & 0.98   \\
+\midrule
+\multirow{4}{*}{$e(3,1)$}
+ & sd           & 0.0337 & 0.0263 & 0.0258 \\
+ & $\pm1\,$sd   & 0.69   & 0.79   & 0.82   \\
+ & $\pm1.5\,$sd & 0.81   & 0.94   & 0.96   \\
+ & $\pm2\,$sd   & 0.98   & 0.99   & 1.00   \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Variance Ratios: QR Estimator}
+\label{ssec:var_qr}
+
+Under $\sqrt{N}$-consistency, the variance should halve when $N$ doubles,
+giving theoretical ratios $\text{var}(N)/\text{var}(2N)=0.5$ and
+$\text{var}(N)/\text{var}(3N)=0.33$.
+Table~\ref{tab:abb_var} compares theoretical and numerical variance ratios.
+
+\begin{table}[H]
+\centering
+\caption{Variance ratios for the ABB QR estimator:
+theoretical (in red) vs.\ numerical.
+Under $\sqrt{N}$-consistency, the theoretical ratios are 0.5 and 0.33.}
+\label{tab:abb_var}
+\begin{tabular}{lcccc}
+\toprule
+ & & $N=792$ & $N=792\times2$ & $N=792\times3$ \\
+\midrule
+\multirow{2}{*}{$e(1,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 0.5327 & 0.4572 \\
+\midrule
+\multirow{2}{*}{$e(2,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 0.7299 & 0.7383 \\
+\midrule
+\multirow{2}{*}{$e(3,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 0.6090 & 0.5861 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The numerical variance ratios are consistently \emph{above} the theoretical
+values ($0.5327>0.5$, $0.7299>0.5$, $0.6090>0.5$), implying that the
+variance shrinks \emph{slower} than $1/N$.
+For parameters $e(2,1)$ and $e(3,1)$ the shrinkage is especially weak
+at $N\times2$ and $N\times3$.
+This suggests that the QR estimator does not attain $\sqrt{N}$-consistency
+in our simulation design despite the theoretical guarantee, likely due to the
+flat interior segments generating a highly multi-modal posterior distribution
+for $\eta_i^T$.
+
+\subsection{Numerical Difficulties of SML under the ABB Density}
+
+When we apply the SML procedure to the ABB model, we encounter two systematic
+numerical problems.
+
+\paragraph{Problem 1: Infinite likelihood.}
+For initial parameter values away from the truth, the ordering constraint
+$A(\ell+1)>A(\ell)$ is easily violated.
+When violated, the simulated likelihood degenerates and the simplex method
+returns the initial value unchanged.
+Specifically, when we set all initial values to $(1, 1.4, 1.8)$ (deviating
+from the true $(1, 1.5, 2)$), the objective function evaluates to $+\infty$
+(equivalently, the log-likelihood evaluates to $-\infty$), and the simplex
+algorithm terminates at the initial value.
+Only initial values very close to the true $(1, 1.45, 1.90)$ allow the
+algorithm to proceed.
+
+\paragraph{Problem 2: Spurious maximum.}
+Even near the truth, the SML estimator locates a parameter vector far from the
+truth with higher pseudo-likelihood.
+With $N=5000$ and $R=5000$ draws, the Nelder--Mead algorithm converges to
+$(\hat a^\varepsilon, \hat a^\eta, \hat a_1^Q, \hat a_2^Q) = (0.1456, 1.8462, 1.1215, 0.9211)$
+at quantiles $(0.25, 0.5, 0.75)$ for each, yielding log-likelihood
+$-9524.01$ vs.\ the true-parameter log-likelihood of $-9527.20$.
+The estimated parameters are far from the truth $(1, 1.5, 2)$ for each
+parameter group, yet attain a higher likelihood---a direct manifestation
+of the density kinks creating a non-identifiable flat region in the
+likelihood surface.
+
+\paragraph{Summary.}
+Figure~\ref{fig:mle_lik} shows the likelihood function profile for
+$a^\eta(k=1,2,3;\,\tau_1)$ under the ABB model.
+The profile does not exhibit the expected single-peaked shape around the true
+value; instead it is irregular and flat.
+
+\begin{figure}[H]
+\centering
+\caption{Likelihood function for $a^\eta(k=1,2,3;\,\tau_1)$ under the ABB model.
+The likelihood does not sharpen around the true value.
+Source: \texttt{imgs/check\_t\_23\_3\_mle\_23\_3\_32\_s2s3.pdf}, pages 34--36.}
+\label{fig:mle_lik}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/check\_t\_23\_3\_mle\_23\_3\_32\_s2s3.pdf}, pages 34, 35, 36]
+\vspace{1cm}}}
+\end{figure}
+
+%==========================================================================
+\section{Performance of MLE vs.\ QR in the ABB Model}
+\label{sec:mle_abb}
+%==========================================================================
+
+\subsection{Likelihood Ratio Analysis}
+
+To further assess the SML estimator, we plot the likelihood ratio
+\eqref{eq:ratio} as a function of a single parameter (holding all others at
+the true value).
+Figure~\ref{fig:lik_ratio} shows that the likelihood ratio profile for
+$a^\eta(k=1,2,3;\,\tau_1)$ is flat and noisy rather than having a clear
+maximum at the true parameter value.
+
+\begin{figure}[H]
+\centering
+\caption{Likelihood ratio for $a^\eta(k=1,2,3;\,\tau_1)$ under the ABB model.
+Source: \texttt{imgs/check\_2\_3\_mle\_ratio\_0526.pdf}, pages 34--36.}
+\label{fig:lik_ratio}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/check\_2\_3\_mle\_ratio\_0526.pdf}, pages 34, 35, 36]
+\vspace{1cm}}}
+\end{figure}
+
+\subsection{Distribution of the SML Estimator}
+
+Table~\ref{tab:mle_var_ini05} reports variance ratios for the SML estimator
+with initial values equal to $0.5$ (far from the truth).
+
+\begin{table}[H]
+\centering
+\caption{Variance ratios for the SML estimator, initial value $=0.5$.
+Theoretical ratios in red.}
+\label{tab:mle_var_ini05}
+\begin{tabular}{lcccc}
+\toprule
+ & & $N=792$ & $N=792\times2$ & $N=792\times3$ \\
+\midrule
+\multirow{3}{*}{$e(1,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 0.2091 & 0.3401 \\
+ & sd          & 0.0948 & 0.0116 & 0.0110 \\
+\midrule
+\multirow{3}{*}{$e(2,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 0.0383 & 0.3110 \\
+ & sd          & 0.0238 & 0.0068 & 0.0048 \\
+\midrule
+\multirow{3}{*}{$e(3,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 0.0571 & 0.0294 \\
+ & sd          & 0.0223 & 0.0053 & 0.0038 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+When the initial value is at the true parameter, the SML estimator shows
+faster variance reduction than the QR estimator (variance ratios approach
+$0.015$ for $e(1,1)$), but this is misleading: the high apparent precision
+reflects the algorithm remaining near its initialisation, not genuine global
+identification.
+
+Table~\ref{tab:mle_var_joint} reports variance ratios for the jointly
+estimated SML (all parameters simultaneously) with initial values at $0.5$.
+
+\begin{table}[H]
+\centering
+\caption{Variance ratios for the SML estimator, jointly estimated,
+initial value $=0.5\times\mathbf{1}_{3\times2}$.}
+\label{tab:mle_var_joint}
+\begin{tabular}{lcccc}
+\toprule
+ & & $N=792$ & $N=792\times2$ & $N=792\times3$ \\
+\midrule
+\multirow{3}{*}{$e(1,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 0.4382 & 0.5265 \\
+ & sd          & 0.1802 & 0.1193 & 0.1308 \\
+\midrule
+\multirow{3}{*}{$e(2,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 0.8746 & 0.5861 \\
+ & sd          & 0.0866 & 0.0810 & 0.0663 \\
+\midrule
+\multirow{3}{*}{$e(3,1)$}
+ & Theoretical & \textcolor{myred}{1} & \textcolor{myred}{0.5} & \textcolor{myred}{0.33} \\
+ & Numerical   & 1 & 1.3901 & 0.6468 \\
+ & sd          & 0.0769 & 0.0907 & 0.0619 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The joint SML also fails to deliver variance ratios close to the theoretical
+values; $e(3,1)$ even shows \emph{increasing} variance when $N$ doubles
+($1.3901 > 1$), confirming the non-smooth likelihood is causing genuine
+estimation failure.
+
+\subsection{Asymptotic Properties and Parametric Inference}
+
+Figures \ref{fig:asymp1}--\ref{fig:asymp3} show histograms, $Q$-$Q$ plots,
+and QR parameter distributions from the oral slides.
+These figures document the distribution of the ABB QR estimator across
+replicates and confirm the lack of concentration around the true value.
+
+\begin{figure}[H]
+\centering
+\caption{Distribution and asymptotic properties of the ABB QR estimator.
+Source: \texttt{imgs/73.pdf} page 1.}
+\label{fig:asymp1}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/73.pdf}, page 1]
+\vspace{1cm}}}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\caption{Parametric inference, ABB QR estimator.
+Source: \texttt{imgs/88.pdf}, \texttt{imgs/88\_2.pdf}, \texttt{imgs/88\_3.pdf}.}
+\label{fig:asymp3}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figures: \texttt{imgs/88.pdf}, \texttt{imgs/88\_2.pdf}, \texttt{imgs/88\_3.pdf}]
+\vspace{1cm}}}
+\end{figure}
+
+%==========================================================================
+\section{Constructing a Smooth Version of the ABB Model}
+\label{sec:smooth}
+%==========================================================================
+
+\subsection{Motivation: Gao and Hastie (2022)}
+
+Gao and Hastie (2022, \textit{Journal of Machine Learning Research}, LinCDE)
+propose a conditional density estimation framework that combines Lindsey's
+method with recursive partitioning.
+Their key insight for our purpose is as follows.
+Instead of specifying the density by inverting a piecewise-linear quantile
+function (which produces a piecewise-constant density), one can
+\emph{directly parameterise the log-density} as a linear combination of
+basis functions:
+\begin{equation}\label{eq:lindsey}
+\log f(z|\mathbf{x};\theta)=\sum_{j=0}^J\theta_j(\mathbf{x})\,b_j(z)-c(\theta,\mathbf{x}),
+\end{equation}
+where $b_j(z)$ are basis functions evaluated at the outcome $z$,
+$\theta_j(\mathbf{x})$ are covariate-dependent coefficients, and
+$c(\theta,\mathbf{x})=\log\int\exp(\sum_j\theta_j(\mathbf{x})b_j(z))dz$
+is the log-partition function.
+This approach guarantees that the density integrates to one and is everywhere
+positive, and the resulting log-likelihood is smooth in $\theta$.
+
+Figures~\ref{fig:gao1}--\ref{fig:gao4} reproduce the relevant specification
+slides from the oral presentation.
+
+\begin{figure}[H]
+\centering
+\caption{Gao--Hastie (2022 JMLR) model specifications.
+Source: \texttt{imgs/Gao.pdf}, pages 1--3.}
+\label{fig:gao1}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/Gao.pdf}, pages 1, 2, 3]
+\vspace{1cm}}}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\caption{Gao--Hastie (2022 JMLR) conditional density estimation specification.
+Source: \texttt{imgs/Gao8.pdf}, page 1.}
+\label{fig:gao2}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/Gao8.pdf}, page 1]
+\vspace{1cm}}}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\caption{ABB ECMA model specifications for conditional density estimation.
+Source: \texttt{imgs/ABB\_37.pdf}, page 1.}
+\label{fig:gao3}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/ABB\_37.pdf}, page 1]
+\vspace{1cm}}}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\caption{Gao--Hastie LinCDE Trees.
+Source: \texttt{imgs/Gao9.pdf} and \texttt{imgs/Gao11.pdf}.}
+\label{fig:gao4}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figures: \texttt{imgs/Gao9.pdf}, page 1;\quad\texttt{imgs/Gao11.pdf}, page 1]
+\vspace{1cm}}}
+\end{figure}
+
+\subsection{The Smooth ABB Density}
+
+We propose applying Lindsey's method to parameterise the densities of
+$\varepsilon_{it}$ and $\eta_{it}|\eta_{i,t-1}$ in the ABB model.
+
+\subsubsection*{Interior: Basis Expansion}
+
+Replace the piecewise-constant interior $[A(1),A(L)]$ with a log-linear
+density:
+\begin{equation}\label{eq:smooth_int}
+f_{\text{int}}(z;\theta,\mathbf{x})
+\propto\exp\!\Bigl(\sum_{j=0}^J\theta_j(\mathbf{x})\,b_j(z)\Bigr),
+\quad z\in[A(1),A(L)],
+\end{equation}
+where $b_j(z)=z^j$ (monomials) or B-spline basis functions evaluated at
+$z=\eta_{it}$ (for the $\eta$ density) or $z=y_{it}-\eta_{it}$ (for the
+$\varepsilon$ density).
+The mass constraints $\int_{A(\ell)}^{A(\ell+1)}f_{\text{int}}(z)dz=\tau_{\ell+1}-\tau_\ell$
+are enforced as linear equality constraints in the optimisation, preserving the
+quantile grid interpretation of the ABB model.
+
+\subsubsection*{Tails: Smooth Exponential Blend}
+
+The exponential tails are retained but attached smoothly via a logistic
+transition at $A(1)$ and $A(L)$:
+\begin{align}
+f_{\text{left}}(z) &= \tau_1\lambda_-\exp[\lambda_-(z-A(1))]\cdot\sigma(\kappa(z-A(1))),
+\quad z<A(1),\\
+f_{\text{right}}(z) &= (1-\tau_L)\lambda_+\exp[-\lambda_+(z-A(L))]\cdot\sigma(\kappa(A(L)-z)),
+\quad z>A(L),
+\end{align}
+where $\sigma(x)=(1+e^{-x})^{-1}$ is the logistic function and $\kappa>0$ is
+a sharpness parameter.
+The full smooth density is
+\begin{equation}\label{eq:smooth_full}
+\tilde f(z;\theta)=f_{\text{left}}(z)\cdot\mathbf{1}\{z<A(1)\}
++f_{\text{int}}(z)\cdot\mathbf{1}\{A(1)\le z\le A(L)\}
++f_{\text{right}}(z)\cdot\mathbf{1}\{z>A(L)\}.
+\end{equation}
+
+\subsubsection*{Continuity and Differentiability}
+
+The logistic transition ensures that $\tilde f$ is everywhere positive and
+continuously differentiable.
+At $z=A(1)$, $\sigma(\kappa(z-A(1)))\to1$ as $\kappa\to\infty$, recovering
+the original exponential tail; the smooth model is therefore a generalisation
+of the ABB model.
+The log-likelihood $\sum_i\log\tilde f(y_i|\theta)$ is differentiable in all
+parameters, enabling gradient-based maximisation via L-BFGS-B.
+
+\subsubsection*{Relation to the Gao--Hastie Framework}
+
+In the smooth ABB model, the log-density over the interior is parameterised
+as $\sum_j\theta_j(\eta_{i,t-1})b_j(\eta_{it})$, where the coefficients
+$\theta_j(\eta_{i,t-1})$ depend on the covariate (lagged persistent component)
+through a linear function of the ABB Hermite basis---exactly the structure
+of \eqref{eq:lindsey} in Gao and Hastie (2022).
+The smooth ABB model therefore provides a theoretically grounded bridge
+between the ABB quantile approach and the Lindsey/LinCDE conditional density
+estimation approach.
+
+%==========================================================================
+\section{Performance of MLE vs.\ QR in the Smooth ABB Model}
+\label{sec:smooth_results}
+%==========================================================================
+
+\subsection{Distribution of the Smooth MLE Estimator}
+
+Figures~\ref{fig:smooth_hist1}--\ref{fig:smooth_hist2} show histograms of
+the smooth MLE estimator for $a^\eta(k=1,2,3;\,\tau_{1})$ and
+$a^\eta(k=1,2,3;\,\tau_2)$ across Monte Carlo replicates, for
+$N\in\{792,792\times2,792\times3\}$.
+
+\begin{figure}[H]
+\centering
+\caption{(Smooth model) Histograms of smooth MLE for $a^\eta(k=1,2,3;\,\tau_1=1/12)$,
+initial value $=0.5$.
+The histograms concentrate around the true value as $N$ increases.
+Source: \texttt{imgs/simp\_mle3\_eta\_0\_discon\_pdf.pdf}, pages 1--3.}
+\label{fig:smooth_hist1}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/simp\_mle3\_eta\_0\_discon\_pdf.pdf}, pages 1, 2, 3]
+\vspace{1cm}}}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\caption{(Smooth model) Histograms of smooth MLE for $a^\eta(k=1,2,3;\,\tau_2=2/12)$,
+initial value $=0.5$.
+Source: \texttt{imgs/simp\_mle3\_eta\_0\_discon\_pdf.pdf}, pages 4--6.}
+\label{fig:smooth_hist2}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1cm}
+[Figure: \texttt{imgs/simp\_mle3\_eta\_0\_discon\_pdf.pdf}, pages 4, 5, 6]
+\vspace{1cm}}}
+\end{figure}
+
+\textbf{Main finding:} In contrast to the ABB QR estimator (Figure~\ref{fig:abb_hist_full}),
+the smooth MLE histograms show clear concentration toward the true value as
+$N$ increases, consistent with $\sqrt{N}$-consistency.
+
+\subsection{Variance Ratios: Smooth MLE vs.\ QR}
+
+Table~\ref{tab:smooth_sd_tau1} and Table~\ref{tab:smooth_sd_tau2} report
+the standard deviation and coverage proportions for the smooth MLE estimator
+at $\tau_1=1/12$ and $\tau_2=2/12$, respectively.
+
+\begin{table}[H]
+\centering
+\caption{Standard deviation and coverage proportions of the smooth MLE estimator,
+$\tau_1=1/12$.}
+\label{tab:smooth_sd_tau1}
+\begin{tabular}{lcccc}
+\toprule
+ & Statistic & $N=792$ & $N=792\times2$ & $N=792\times3$ \\
+\midrule
+\multirow{4}{*}{$e(1,1)$}
+ & sd           & 0.3151 & 0.1441 & 0.1837 \\
+ & $\pm1\,$sd   & 0.89   & 0.97   & 0.95   \\
+ & $\pm1.5\,$sd & 0.89   & 0.97   & 0.96   \\
+ & $\pm2\,$sd   & 0.89   & 0.98   & 0.96   \\
+\midrule
+\multirow{4}{*}{$e(2,1)$}
+ & sd           & 0.0675 & 0.0132 & 0.0376 \\
+ & $\pm1\,$sd   & 0.95   & 0.99   & 0.99   \\
+ & $\pm1.5\,$sd & 0.96   & 0.99   & 0.99   \\
+ & $\pm2\,$sd   & 0.96   & 1.00   & 0.99   \\
+\midrule
+\multirow{4}{*}{$e(3,1)$}
+ & sd           & 0.1302 & 0.0425 & 0.0329 \\
+ & $\pm1\,$sd   & 0.93   & 0.99   & 0.99   \\
+ & $\pm1.5\,$sd & 0.93   & 0.99   & 0.99   \\
+ & $\pm2\,$sd   & 0.93   & 0.99   & 0.99   \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Standard deviation and coverage proportions of the smooth MLE estimator,
+$\tau_2=2/12$.}
+\label{tab:smooth_sd_tau2}
+\begin{tabular}{lcccc}
+\toprule
+ & Statistic & $N=792$ & $N=792\times2$ & $N=792\times3$ \\
+\midrule
+\multirow{4}{*}{$e(1,2)$}
+ & sd           & 0.3294 & 0.1290 & 0.1692 \\
+ & $\pm1\,$sd   & 0.85   & 0.96   & 0.96   \\
+ & $\pm1.5\,$sd & 0.88   & 0.98   & 0.96   \\
+ & $\pm2\,$sd   & 0.88   & 1.00   & 0.97   \\
+\midrule
+\multirow{4}{*}{$e(2,2)$}
+ & sd           & 0.1232 & 0.0372 & 0.0112 \\
+ & $\pm1\,$sd   & 0.92   & 0.98   & 1.00   \\
+ & $\pm1.5\,$sd & 0.92   & 0.98   & 1.00   \\
+ & $\pm2\,$sd   & 0.93   & 0.99   & 1.00   \\
+\midrule
+\multirow{4}{*}{$e(3,2)$}
+ & sd           & 0.1271 & 0.0378 & 0.0068 \\
+ & $\pm1\,$sd   & 0.92   & 0.98   & 1.00   \\
+ & $\pm1.5\,$sd & 0.92   & 0.98   & 1.00   \\
+ & $\pm2\,$sd   & 0.92   & 0.99   & 1.00   \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The standard deviation of $e(2,2)$ drops from $0.1232$ at $N=792$ to
+$0.0372$ at $N=792\times2$ (ratio $0.0909$) and $0.0112$ at $N=792\times3$
+(ratio $0.0083$)---a decay substantially faster than the $\sqrt{N}$ rate,
+reflecting the improved performance of MLE over QR in the smooth model.
+Coverage proportions approach 1 rapidly, consistent with asymptotic normality.
+
+\subsection{Likelihood Profile in the Smooth Model}
+
+A key diagnostic is the shape of the likelihood function around the true
+parameter value.
+In the smooth model, the one-dimensional likelihood profile for each parameter
+is a smooth unimodal curve with a clear maximum at or very near the true value.
+Moreover, the profile \emph{sharpens} as $N$ increases---the curvature at the
+maximum grows proportionally to $N$---consistent with the Fisher information
+accumulation property of correctly specified MLE.
+This is in sharp contrast to the non-sharpening of the ABB check-function
+profile documented in Figures~\ref{fig:check_N792}--\ref{fig:check_N2_3}.
+
+%==========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%==========================================================================
+
+This paper has studied two limitations of the ABB nonlinear panel data
+framework and proposed a smooth extension to address them.
+
+\textbf{Limitation 1: Density kinks.}
+The piecewise-linear-exponential density implied by ABB's quantile
+parameterisation has interior discontinuities (``kinks'') at the quantile
+grid nodes.
+These kinks cause the log-likelihood to be non-differentiable, making
+gradient-based MLE infeasible.
+Moreover, for a wide range of parameter values the simulated likelihood
+degenerates to $-\infty$, causing simplex-based optimisers to fail.
+Even when the algorithm proceeds, it locates a spurious maximum far from
+the truth because the flat interior segments of the density create a
+wide non-identifiable region.
+
+\textbf{Limitation 2: Non-consistency of QR in simulations.}
+In our Monte Carlo replications of the ABB procedure, the variance of the
+QR estimator shrinks more slowly than $1/N$: the variance ratio
+$\text{var}(N)/\text{var}(2N)$ ranges from $0.53$ to $0.73$, compared
+to the theoretical value of $0.50$.
+The coefficient histograms do not concentrate around the true value as $N$
+increases, and the check-function objective does not sharpen with sample size.
+
+\textbf{Smooth extension.}
+We propose replacing the piecewise-constant interior density with a
+basis-expansion (Lindsey's method) density inspired by Gao and Hastie (2022),
+attached smoothly to exponential tails via a logistic transition.
+Within this smooth model, the MLE estimator exhibits clear concentration of
+histograms around the true value, standard deviations that decay faster than
+$1/\sqrt{N}$, and a sharpening likelihood profile as $N$ grows.
+
+Several directions for future research emerge.
+The smooth ABB model should be estimated on the PSID data and compared to
+ABB's empirical results to assess whether the smoothing materially affects
+the estimated nonlinear-persistence patterns.
+Formal asymptotic theory for the smooth MLE estimator---including the
+rate of convergence, limiting distribution, and comparison with the QR
+estimator's efficiency---remains an open question.
+Finally, the smooth density could be integrated with the consumption policy
+rule of ABB to deliver an efficient joint estimator of the earnings and
+consumption dynamics system.
+
+\bigskip
+\bibliographystyle{apalike}
+\begin{thebibliography}{99}
+
+\bibitem[Arellano and Bonhomme(2016)]{ab2016}
+Arellano, M.\ and Bonhomme, S.\ (2016).
+Nonlinear panel data estimation via quantile regressions.
+\textit{Econometrics Journal}, 19(3):C61--C94.
+
+\bibitem[Arellano et al.(2017)]{abb2017}
+Arellano, M., Blundell, R., and Bonhomme, S.\ (2017).
+Earnings and consumption dynamics: a nonlinear panel data framework.
+\textit{Econometrica}, 85(3):693--734.
+
+\bibitem[Blundell et al.(2008)]{bpp2008}
+Blundell, R., Pistaferri, L., and Preston, I.\ (2008).
+Consumption inequality and partial insurance.
+\textit{American Economic Review}, 98(5):1887--1921.
+
+\bibitem[Gao and Hastie(2022)]{gao2022}
+Gao, Z.\ and Hastie, T.\ (2022).
+LinCDE: conditional density estimation via Lindsey's method.
+\textit{Journal of Machine Learning Research}, 23(267):1--56.
+
+\bibitem[Gourinchas and Parker(2002)]{gp2002}
+Gourinchas, P.-O.\ and Parker, J.\ A.\ (2002).
+Consumption over the life cycle.
+\textit{Econometrica}, 70(1):47--89.
+
+\bibitem[Hajivassiliou and Ruud(1994)]{hr1994}
+Hajivassiliou, V.\ A.\ and Ruud, P.\ A.\ (1994).
+Classical estimation methods for LDV models using simulation.
+\textit{Handbook of Econometrics}, 4:2383--2441.
+
+\bibitem[Hu and Schennach(2008)]{hs2008}
+Hu, Y.\ and Schennach, S.\ M.\ (2008).
+Instrumental variable treatment of nonclassical measurement error models.
+\textit{Econometrica}, 76(1):195--216.
+
+\bibitem[Nielsen(2000)]{nielsen2000}
+Nielsen, S.\ F.\ (2000).
+The stochastic EM algorithm: estimation and asymptotic results.
+\textit{Bernoulli}, 6(3):457--489.
+
+\bibitem[Wei and Carroll(2009)]{wc2009}
+Wei, Y.\ and Carroll, R.\ J.\ (2009).
+Quantile regression with measurement error.
+\textit{Journal of the American Statistical Association}, 104(487):1129--1143.
+
+\bibitem[Wilhelm(2015)]{wilhelm2015}
+Wilhelm, D.\ (2015).
+Identification and estimation of nonparametric panel data regressions with
+measurement error.
+cemmap Working Paper CWP34/15.
+
+\end{thebibliography}
+
+\appendix
+
+%==========================================================================
+\section{Figure List}
+\label{app:figures}
+%==========================================================================
+
+The following figures are referenced in the paper.
+They require the corresponding image files to be present in the
+\texttt{imgs/} subdirectory relative to this \texttt{.tex} file.
+All figure files originate from the computational experiments described in
+the notes and oral presentation files.
+
+\begin{itemize}
+\item \textbf{Figure~\ref{fig:disc_density}}: Density of $\eta_{i1}$ under
+  three parameterisations.
+  File: \texttt{imgs/simp\_mle3\_eta\_0\_discon\_pdf.pdf}, pages 9, 7, 8.
+\item \textbf{Figure~\ref{fig:check_N792}}: Check function at $N=792$.
+  File: \texttt{imgs/check\_23\_n792\_tau1.pdf}, pages 1--3.
+\item \textbf{Figure~\ref{fig:check_N2_3}}: Check function at $N=792\times2$
+  and $N=792\times3$.
+  File: \texttt{imgs/check\_23\_n792\_tau1\_k1.pdf}, pages 1--3.
+\item \textbf{Figure~\ref{fig:abb_hist_full}}: Bootstrap histograms, ABB QR
+  estimator.
+  File: \texttt{edge3\_eta\_0\_comb\_abb7\_agecorrect.pdf},
+  pages 1, 12, 23.
+\item \textbf{Figure~\ref{fig:mle_lik}}: Likelihood function under ABB.
+  File: \texttt{imgs/check\_t\_23\_3\_mle\_23\_3\_32\_s2s3.pdf},
+  pages 34--36.
+\item \textbf{Figure~\ref{fig:lik_ratio}}: Likelihood ratio under ABB.
+  File: \texttt{imgs/check\_2\_3\_mle\_ratio\_0526.pdf}, pages 34--36.
+\item \textbf{Figures~\ref{fig:asymp1}--\ref{fig:asymp3}}: Asymptotic
+  properties and parametric inference.
+  Files: \texttt{imgs/73.pdf} (p.\,1),
+  \texttt{imgs/88.pdf}, \texttt{imgs/88\_2.pdf}, \texttt{imgs/88\_3.pdf}.
+\item \textbf{Figures~\ref{fig:gao1}--\ref{fig:gao4}}: Gao--Hastie (2022)
+  specifications.
+  Files: \texttt{imgs/Gao.pdf} (pp.\,1--3),
+  \texttt{imgs/Gao8.pdf} (p.\,1),
+  \texttt{imgs/ABB\_37.pdf} (p.\,1),
+  \texttt{imgs/Gao9.pdf} (p.\,1),
+  \texttt{imgs/Gao11.pdf} (p.\,1).
+\item \textbf{Figures~\ref{fig:smooth_hist1}--\ref{fig:smooth_hist2}}: Smooth
+  MLE histograms.
+  File: \texttt{imgs/simp\_mle3\_eta\_0\_discon\_pdf.pdf}, pages 1--6.
+\end{itemize}
+
+\end{document}
