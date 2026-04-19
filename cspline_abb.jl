@@ -2065,14 +2065,223 @@ function cspline_draw(rng::AbstractRNG, t::Vector{Float64}, s::Vector{Float64},
     mode + σ_prop * randn(rng)
 end
 
+# Stationary version: η₁ drawn from stationary distribution via burn-in
+function generate_data_stationary(N::Int, a_Q::Matrix{Float64}, M_Q::Float64,
+                                   a_eps1::Float64, a_eps3::Float64, M_eps::Float64,
+                                   K::Int, σy::Float64, τ::Vector{Float64};
+                                   seed::Int=42, T::Int=3, burnin::Int=100)
+    rng = MersenneTwister(seed)
+    eta = zeros(N, T); y = zeros(N, T)
+    hv = zeros(K+1); t = zeros(3); s = zeros(3); masses = zeros(4)
+    βL_ref = Ref(0.0); βR_ref = Ref(0.0)
+    κ1_ref = Ref(0.0); κ3_ref = Ref(0.0)
+
+    # Eps density
+    a_eps_s = [a_eps1, 0.0, a_eps3]
+    s_eps = zeros(3)
+    solve_cspline_c2!(s_eps, βL_ref, βR_ref, κ1_ref, κ3_ref, a_eps_s, τ, M_eps)
+    β_L_eps = βL_ref[]; β_R_eps = βR_ref[]
+    κ1_eps = κ1_ref[]; κ3_eps = κ3_ref[]
+    m_eps = zeros(4)
+    cspline_masses!(m_eps, a_eps_s, s_eps, β_L_eps, β_R_eps, κ1_eps, κ3_eps, 0.0)
+    C_eps = sum(m_eps)
+
+    # Draw η₁ from stationary distribution via burn-in
+    for i in 1:N
+        η = 0.0  # arbitrary start
+        for b in 1:burnin
+            z = η / σy
+            hv[1]=1.0; K>=1 && (hv[2]=z)
+            for k in 2:K; hv[k+1] = z*hv[k] - (k-1)*hv[k-1]; end
+            for l in 1:3; t[l] = dot(view(a_Q,:,l), hv); end
+            if t[2] <= t[1] || t[3] <= t[2]; η = 0.0; continue; end
+            solve_cspline_c2!(s, βL_ref, βR_ref, κ1_ref, κ3_ref, t, τ, M_Q)
+            cspline_masses!(masses, t, s, βL_ref[], βR_ref[], κ1_ref[], κ3_ref[], 0.0)
+            C = masses[1]+masses[2]+masses[3]+masses[4]
+            η = cspline_draw(rng, t, s, βL_ref[], βR_ref[], κ1_ref[], κ3_ref[], C)
+        end
+        eta[i,1] = η
+    end
+
+    # Transitions t=2,...,T
+    for t_step in 2:T, i in 1:N
+        z = eta[i,t_step-1] / σy
+        hv[1]=1.0; K>=1 && (hv[2]=z)
+        for k in 2:K; hv[k+1] = z*hv[k] - (k-1)*hv[k-1]; end
+        for l in 1:3; t[l] = dot(view(a_Q,:,l), hv); end
+        if t[2] <= t[1] || t[3] <= t[2]; continue; end
+        solve_cspline_c2!(s, βL_ref, βR_ref, κ1_ref, κ3_ref, t, τ, M_Q)
+        cspline_masses!(masses, t, s, βL_ref[], βR_ref[], κ1_ref[], κ3_ref[], 0.0)
+        C = masses[1]+masses[2]+masses[3]+masses[4]
+        eta[i,t_step] = cspline_draw(rng, t, s, βL_ref[], βR_ref[], κ1_ref[], κ3_ref[], C)
+    end
+
+    # Add measurement error
+    for t_step in 1:T, i in 1:N
+        y[i,t_step] = eta[i,t_step] + cspline_draw(rng, a_eps_s, s_eps, β_L_eps, β_R_eps, κ1_eps, κ3_eps, C_eps)
+    end
+    y, eta
+end
+
+# Stationary likelihood: init density = stationary distribution (computed via grid)
+function cspline_neg_loglik_stationary(a_Q::Matrix{Float64}, M_Q::Float64,
+                                        a_eps1::Float64, a_eps3::Float64, M_eps::Float64,
+                                        y::Matrix{Float64}, K::Int, σy::Float64, τ::Vector{Float64},
+                                        ws::CSplineWorkspace; n_power::Int=50)
+    N, T = size(y)
+    G = ws.G_base
+
+    # Build transition matrix
+    cspline_transition_matrix!(ws.T_mat, ws.grid, G, a_Q, M_Q, K, σy, τ,
+                               ws.hv_buf, ws.t_buf, ws.s_buf, ws.masses_buf, ws.c1buf)
+    ws.T_mat[1,1] < 0 && return Inf
+
+    # Compute stationary distribution by power iteration: π = T'π (with quadrature)
+    # Start from uniform
+    p_stat = ones(G) / G
+    p_new = zeros(G)
+    for iter in 1:n_power
+        @inbounds for g in 1:G; ws.pw[g] = p_stat[g] * ws.sw[g]; end
+        mul!(view(p_new, 1:G), transpose(view(ws.T_mat, 1:G, 1:G)), view(ws.pw, 1:G))
+        L = dot(view(p_new, 1:G), view(ws.sw, 1:G))
+        L < 1e-300 && return Inf
+        @inbounds for g in 1:G; p_stat[g] = p_new[g] / L; end
+    end
+
+    # Use p_stat as init density (replaces f_init)
+    @inbounds for g in 1:G; ws.f_init[g] = p_stat[g]; end
+
+    # Eps density
+    ws.a_eps_s[1] = a_eps1; ws.a_eps_s[2] = 0.0; ws.a_eps_s[3] = a_eps3
+    (ws.a_eps_s[2] <= ws.a_eps_s[1] || ws.a_eps_s[3] <= ws.a_eps_s[2]) && return Inf
+    (ws.a_eps_s[2]-ws.a_eps_s[1] < 1e-6 || ws.a_eps_s[3]-ws.a_eps_s[2] < 1e-6) && return Inf
+    βLe_ref = Ref(0.0); βRe_ref = Ref(0.0)
+    κ1e_ref = Ref(0.0); κ3e_ref = Ref(0.0)
+    solve_cspline_c2!(ws.s_buf, βLe_ref, βRe_ref, κ1e_ref, κ3e_ref, ws.a_eps_s, τ, M_eps, ws.c1buf)
+    β_L_eps = βLe_ref[]; β_R_eps = βRe_ref[]
+    κ1_eps = κ1e_ref[]; κ3_eps = κ3e_ref[]
+    (isnan(ws.s_buf[1]) || isnan(β_L_eps)) && return Inf
+    log_ref_eps = ws.s_buf[1]
+    @inbounds for g in 1:G
+        v = cspline_eval(ws.grid[g], ws.a_eps_s, ws.s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps)
+        v > log_ref_eps && (log_ref_eps = v)
+    end
+    cspline_masses!(ws.masses_buf, ws.a_eps_s, ws.s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps, log_ref_eps)
+    C_eps_shifted = ws.masses_buf[1]+ws.masses_buf[2]+ws.masses_buf[3]+ws.masses_buf[4]
+    C_eps_shifted < 1e-300 && return Inf
+    any(isnan, ws.masses_buf) && return Inf
+
+    # Forward filter (same as non-stationary, but using p_stat for init)
+    total_ll = 0.0
+    p_v = view(ws.p, 1:G)
+    p_new_v = view(ws.p_new, 1:G)
+    sw_v = view(ws.sw, 1:G)
+    T_v = view(ws.T_mat, 1:G, 1:G)
+    pw_buf = zeros(G)
+
+    @inbounds for i in 1:N
+        for g in 1:G
+            f_e = exp(cspline_eval(y[i,1]-ws.grid[g], ws.a_eps_s, ws.s_buf,
+                                   β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps) / C_eps_shifted
+            ws.p[g] = ws.f_init[g] * f_e
+        end
+        L1 = dot(p_v, sw_v)
+        L1 < 1e-300 && return Inf
+        total_ll += log(L1); p_v ./= L1
+
+        for t_step in 2:T
+            @inbounds for g in 1:G; pw_buf[g] = ws.p[g] * ws.sw[g]; end
+            mul!(p_new_v, transpose(T_v), view(pw_buf, 1:G))
+            for g in 1:G
+                f_e = exp(cspline_eval(y[i,t_step]-ws.grid[g], ws.a_eps_s, ws.s_buf,
+                                       β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps) / C_eps_shifted
+                ws.p_new[g] *= f_e
+            end
+            Lt = dot(p_new_v, sw_v)
+            Lt < 1e-300 && return Inf
+            total_ll += log(Lt); p_new_v ./= Lt
+            @inbounds for g in 1:G; ws.p[g] = ws.p_new[g]; end
+        end
+    end
+    -total_ll / N
+end
+
+# Pack/unpack for stationary model (no a_init, M_init)
+function pack_stationary(a_Q::Matrix{Float64}, M_Q::Float64,
+                          a_eps1::Float64, a_eps3::Float64, M_eps::Float64)
+    K = size(a_Q, 1) - 1
+    nk = K + 1
+    median_q = a_Q[:, 2]
+    dL0 = a_Q[1,2]-a_Q[1,1]; dL1 = a_Q[2,2]-a_Q[2,1]; dL2 = a_Q[3,2]-a_Q[3,1]
+    δL1, δL2, δL3 = delta_from_gap(dL0, dL1, dL2)
+    dR0 = a_Q[1,3]-a_Q[1,2]; dR1 = a_Q[2,3]-a_Q[2,2]; dR2 = a_Q[3,3]-a_Q[3,2]
+    δR1, δR2, δR3 = delta_from_gap(dR0, dR1, dR2)
+    vcat(median_q, δL1, δL2, δL3, δR1, δR2, δR3,
+         log(-M_Q), log(-a_eps1), log(a_eps3), log(-M_eps))
+    # 3+3+3+1+2+1 = 13 total
+end
+
+function unpack_stationary(v::Vector{Float64}, K::Int)
+    nk = K + 1
+    median_q = v[1:nk]
+    dL0, dL1, dL2 = gap_from_delta(v[nk+1], v[nk+2], v[nk+3])
+    dR0, dR1, dR2 = gap_from_delta(v[nk+4], v[nk+5], v[nk+6])
+    a_Q = zeros(nk, 3)
+    a_Q[:, 2] .= median_q
+    a_Q[1,1] = median_q[1]-dL0; a_Q[2,1] = median_q[2]-dL1; a_Q[3,1] = median_q[3]-dL2
+    a_Q[1,3] = median_q[1]+dR0; a_Q[2,3] = median_q[2]+dR1; a_Q[3,3] = median_q[3]+dR2
+    M_Q = -exp(v[nk+7])
+    a_eps1 = -exp(v[nk+8])
+    a_eps3 = exp(v[nk+9])
+    M_eps = -exp(v[nk+10])
+    (a_Q, M_Q, a_eps1, a_eps3, M_eps)
+end
+
+# Stationary MLE estimator
+function estimate_stationary_ml(y::Matrix{Float64}, K::Int, σy::Float64,
+                                 v0::Vector{Float64}, τ::Vector{Float64};
+                                 G::Int=201, maxiter::Int=500)
+    ws = CSplineWorkspace(G, K)
+    np = length(v0)
+
+    function obj(v)
+        a_Q, M_Q, ae1, ae3, Me = unpack_stationary(v, K)
+        val = cspline_neg_loglik_stationary(a_Q, M_Q, ae1, ae3, Me, y, K, σy, τ, ws)
+        (isinf(val) || isnan(val)) ? 1e10 : val
+    end
+
+    function grad!(g, v)
+        vt = copy(v)
+        @inbounds for j in 1:np
+            h_j = max(1e-5, 1e-4 * abs(v[j]))
+            vt[j] = v[j] + h_j; fp = obj(vt)
+            vt[j] = v[j] - h_j; fm = obj(vt)
+            vt[j] = v[j]; g[j] = (fp - fm) / (2 * h_j)
+        end
+        if any(isnan, g)
+            @. g = 100.0 * (v - v0)
+            norm_g = sqrt(sum(abs2, g))
+            norm_g > 0 && (@. g = g / norm_g * 10.0)
+        end
+    end
+
+    res = optimize(obj, grad!, v0,
+                   LBFGS(; linesearch=LineSearches.BackTracking()),
+                   Optim.Options(iterations=maxiter, g_tol=1e-8))
+    v_opt = Optim.minimizer(res)
+    @printf("  Stationary ML: nll=%.6f (iters=%d)\n",
+            Optim.minimum(res), Optim.iterations(res)); flush(stdout)
+    v_opt, Optim.minimum(res)
+end
+
+# Non-stationary version (original)
 # C² version: β determined by spline, quadratic tails with κ_mean
 function generate_data_cspline(N::Int, a_Q::Matrix{Float64}, M_Q::Float64,
                                 a_init::Vector{Float64}, M_init::Float64,
                                 a_eps1::Float64, a_eps3::Float64, M_eps::Float64,
                                 K::Int, σy::Float64, τ::Vector{Float64};
-                                seed::Int=42)
+                                seed::Int=42, T::Int=3)
     rng = MersenneTwister(seed)
-    T = 3
     eta = zeros(N, T); y = zeros(N, T)
     hv = zeros(K+1); t = zeros(3); s = zeros(3); masses = zeros(4)
     βL_ref = Ref(0.0); βR_ref = Ref(0.0)
@@ -2550,6 +2759,93 @@ function estimate_cspline_ml(y::Matrix{Float64}, K::Int, σy::Float64,
                                  show_trace=verbose, show_every=10))
     v_opt = Optim.minimizer(res)
     @printf("  CSpline ML final obj: %.6f (iters=%d)\n",
+            Optim.minimum(res), Optim.iterations(res)); flush(stdout)
+    v_opt, Optim.minimum(res)
+end
+
+# ================================================================
+#  PROFILED MLE: M determined from IQR, optimize only quantile params
+#
+#  M = -1.349² / IQR²  (IQR-based curvature from quantile knots)
+#  Parameters: a_Q (9) + a_init (3) + a_eps (2) = 14
+#  Same parameter count as QR.
+# ================================================================
+
+# Pack: quantile-only parameters (no M)
+function pack_profiled(a_Q::Matrix{Float64}, a_init::Vector{Float64},
+                        a_eps1::Float64, a_eps3::Float64)
+    K = size(a_Q, 1) - 1; nk = K + 1
+    median_q = a_Q[:, 2]
+    dL0=a_Q[1,2]-a_Q[1,1]; dL1=a_Q[2,2]-a_Q[2,1]; dL2=a_Q[3,2]-a_Q[3,1]
+    δL1, δL2, δL3 = delta_from_gap(dL0, dL1, dL2)
+    dR0=a_Q[1,3]-a_Q[1,2]; dR1=a_Q[2,3]-a_Q[2,2]; dR2=a_Q[3,3]-a_Q[3,2]
+    δR1, δR2, δR3 = delta_from_gap(dR0, dR1, dR2)
+    init_median = a_init[2]
+    init_log_gap_L = log(a_init[2] - a_init[1])
+    init_log_gap_R = log(a_init[3] - a_init[2])
+    vcat(median_q, δL1, δL2, δL3, δR1, δR2, δR3,
+         init_median, init_log_gap_L, init_log_gap_R,
+         log(-a_eps1), log(a_eps3))
+    # 3+3+3+3+2 = 14 total
+end
+
+function unpack_profiled(v::Vector{Float64}, K::Int)
+    nk = K + 1
+    median_q = v[1:nk]
+    dL0, dL1, dL2 = gap_from_delta(v[nk+1], v[nk+2], v[nk+3])
+    dR0, dR1, dR2 = gap_from_delta(v[nk+4], v[nk+5], v[nk+6])
+    a_Q = zeros(nk, 3)
+    a_Q[:, 2] .= median_q
+    a_Q[1,1]=median_q[1]-dL0; a_Q[2,1]=median_q[2]-dL1; a_Q[3,1]=median_q[3]-dL2
+    a_Q[1,3]=median_q[1]+dR0; a_Q[2,3]=median_q[2]+dR1; a_Q[3,3]=median_q[3]+dR2
+    p = nk + 6
+    init_median = v[p+1]
+    gap_L = exp(v[p+2]); gap_R = exp(v[p+3])
+    a_init = [init_median - gap_L, init_median, init_median + gap_R]
+    a_eps1 = -exp(v[p+4]); a_eps3 = exp(v[p+5])
+    # Compute M from IQR: M = -1.349² / IQR²
+    iqr_Q = a_Q[1,3] - a_Q[1,1]  # IQR at η=0
+    M_Q = _M_from_iqr(iqr_Q)
+    iqr_init = a_init[3] - a_init[1]
+    M_init = _M_from_iqr(iqr_init)
+    iqr_eps = a_eps3 - a_eps1
+    M_eps = _M_from_iqr(iqr_eps)
+    (a_Q, M_Q, a_init, M_init, a_eps1, a_eps3, M_eps)
+end
+
+function estimate_profiled_ml(y::Matrix{Float64}, K::Int, σy::Float64,
+                               v0::Vector{Float64}, τ::Vector{Float64};
+                               G::Int=201, maxiter::Int=500)
+    ws = CSplineWorkspace(G, K)
+    np = length(v0)
+
+    function obj(v)
+        a_Q, M_Q, a_init, M_init, a_eps1, a_eps3, M_eps = unpack_profiled(v, K)
+        val = cspline_neg_loglik(a_Q, M_Q, a_init, M_init,
+                                  a_eps1, a_eps3, M_eps, y, K, σy, τ, ws)
+        (isinf(val) || isnan(val)) ? 1e10 : val
+    end
+
+    function grad!(g, v)
+        vt = copy(v)
+        @inbounds for j in 1:np
+            h_j = max(1e-5, 1e-4 * abs(v[j]))
+            vt[j] = v[j] + h_j; fp = obj(vt)
+            vt[j] = v[j] - h_j; fm = obj(vt)
+            vt[j] = v[j]; g[j] = (fp - fm) / (2 * h_j)
+        end
+        if any(isnan, g)
+            @. g = 100.0 * (v - v0)
+            norm_g = sqrt(sum(abs2, g))
+            norm_g > 0 && (@. g = g / norm_g * 10.0)
+        end
+    end
+
+    res = optimize(obj, grad!, v0,
+                   LBFGS(; linesearch=LineSearches.BackTracking()),
+                   Optim.Options(iterations=maxiter, g_tol=1e-8))
+    v_opt = Optim.minimizer(res)
+    @printf("  Profiled ML: nll=%.6f (iters=%d)\n",
             Optim.minimum(res), Optim.iterations(res)); flush(stdout)
     v_opt, Optim.minimum(res)
 end
