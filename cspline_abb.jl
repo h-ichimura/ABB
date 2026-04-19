@@ -1247,9 +1247,21 @@ function CSplineWorkspace(G::Int, K::Int=2; grid_min=-8.0, grid_max=8.0, G_ext::
     base = collect(range(grid_min, grid_max, length=G))
     grid[1:G] .= base
     h = (grid_max - grid_min) / (G-1)
-    sw[1]=1.0; sw[G]=1.0
-    @inbounds for i in 2:G-1; sw[i] = iseven(i) ? 4.0 : 2.0; end
-    @views sw[1:G] .*= h/3
+    # Boole's rule (5-point Newton-Cotes, O(h⁶)) for G = 4k+1
+    # Weights: [7, 32, 12, 32, 14, 32, 12, 32, 14, ..., 14, 32, 12, 32, 7] × 2h/45
+    if (G - 1) % 4 == 0
+        sw[1] = 7.0; sw[G] = 7.0
+        @inbounds for i in 2:G-1
+            r = (i - 1) % 4
+            sw[i] = r == 0 ? 14.0 : r == 1 ? 32.0 : r == 2 ? 12.0 : 32.0
+        end
+        @views sw[1:G] .*= 2h/45
+    else
+        # Fallback to Simpson if G ≠ 4k+1
+        sw[1]=1.0; sw[G]=1.0
+        @inbounds for i in 2:G-1; sw[i] = iseven(i) ? 4.0 : 2.0; end
+        @views sw[1:G] .*= h/3
+    end
     np = (K+1)*3 + 1 + 3 + 1 + 2 + 1  # 9+1+3+1+2+1 = 17 for K=2
     CSplineWorkspace(grid, sw, zeros(G_max, G_max), zeros(G_max), zeros(G_max),
                      zeros(G_max), zeros(G_max),
@@ -1367,47 +1379,162 @@ function cspline_neg_loglik(a_Q::Matrix{Float64}, M_Q::Float64,
 
     total_ll = 0.0
 
-    # Views for the active portion of the grid
-    grid_v = view(ws.grid, 1:G)
-
-    # Log-density buffer for logspace normalization
-    log_p = zeros(G)
-    pw_buf = zeros(G)
+    # Views
+    p_v = view(ws.p, 1:G)
     p_new_v = view(ws.p_new, 1:G)
+    sw_v = view(ws.sw, 1:G)
     T_v = view(ws.T_mat, 1:G, 1:G)
+    pw_buf = zeros(G)
 
     @inbounds for i in 1:N
-        # ---- t=1: log p(g) = log f_init(g) + log f_eps(y₁-g) ----
+        # ---- t=1 ----
         for g in 1:G
-            log_p[g] = log(max(ws.f_init[g], 1e-300)) +
-                        cspline_eval(y[i,1]-ws.grid[g], ws.a_eps_s, ws.s_buf,
-                                     β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps_shifted)
+            f_e = exp(cspline_eval(y[i,1]-ws.grid[g], ws.a_eps_s, ws.s_buf,
+                                   β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps) / C_eps_shifted
+            ws.p[g] = ws.f_init[g] * f_e
         end
-        # Normalize using logspace integration (exact exp(cubic) per segment)
-        L1 = logspace_integrate(log_p, grid_v, G)
+        L1 = dot(p_v, sw_v)
         L1 < 1e-300 && return Inf
-        total_ll += log(L1)
-        # Normalized p for prediction step
-        @inbounds for g in 1:G; ws.p[g] = exp(log_p[g]) / L1; end
+        total_ll += log(L1); p_v ./= L1
 
         for t_step in 2:T
-            # ---- Prediction: p_pred = T' × (p ⊙ sw) via matrix-vector ----
-            # (logspace not beneficial here: log T has complex η-dependence)
+            # ---- Prediction: mat-vec with Boole weights ----
             @inbounds for g in 1:G; pw_buf[g] = ws.p[g] * ws.sw[g]; end
             mul!(p_new_v, transpose(T_v), view(pw_buf, 1:G))
 
-            # ---- Observation update in log-space ----
+            # ---- Observation update ----
             for g in 1:G
-                log_p[g] = log(max(ws.p_new[g], 1e-300)) +
-                            cspline_eval(y[i,t_step]-ws.grid[g], ws.a_eps_s, ws.s_buf,
-                                         β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps_shifted)
+                f_e = exp(cspline_eval(y[i,t_step]-ws.grid[g], ws.a_eps_s, ws.s_buf,
+                                       β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps) / C_eps_shifted
+                ws.p_new[g] *= f_e
             end
-            Lt = logspace_integrate(log_p, grid_v, G)
+            Lt = dot(p_new_v, sw_v)
             Lt < 1e-300 && return Inf
-            total_ll += log(Lt)
-            @inbounds for g in 1:G; ws.p[g] = exp(log_p[g]) / Lt; end
+            total_ll += log(Lt); p_new_v ./= Lt
+            @inbounds for g in 1:G; ws.p[g] = ws.p_new[g]; end
         end
     end
+    -total_ll / N
+end
+
+# ================================================================
+#  SIMULATED MAXIMUM LIKELIHOOD (SML) — grid-free
+#
+#  Instead of grid-based forward filter, simulate η draws from the
+#  model and compute likelihood by averaging:
+#    L(θ|y_i) = (1/R) Σ_r Π_t f_eps(y_{i,t} - η^r_{i,t})
+#
+#  η draws use inverse CDF (exact via Taylor series), fixed uniform
+#  random numbers (smooth in θ). No grid approximation.
+# ================================================================
+
+function cspline_neg_loglik_sml(a_Q::Matrix{Float64}, M_Q::Float64,
+                                 a_init::Vector{Float64}, M_init::Float64,
+                                 a_eps1::Float64, a_eps3::Float64, M_eps::Float64,
+                                 y::Matrix{Float64}, K::Int, σy::Float64, τ::Vector{Float64};
+                                 R::Int=200, seed::Int=12345)
+    N, T_obs = size(y)
+    rng = MersenneTwister(seed)
+
+    # Pre-draw R×N×T uniform random numbers (fixed for smoothness in θ)
+    U = rand(rng, R, N, T_obs)
+
+    # Solve eps density (fixed knots, doesn't depend on η)
+    a_eps_s = [a_eps1, 0.0, a_eps3]
+    (a_eps_s[2] <= a_eps_s[1] || a_eps_s[3] <= a_eps_s[2]) && return Inf
+    s_eps = zeros(3); βLe = Ref(0.0); βRe = Ref(0.0); κ1e = Ref(0.0); κ3e = Ref(0.0)
+    solve_cspline_c2!(s_eps, βLe, βRe, κ1e, κ3e, a_eps_s, τ, M_eps)
+    β_L_eps = βLe[]; β_R_eps = βRe[]; κ1_eps = κ1e[]; κ3_eps = κ3e[]
+    log_ref_eps = max(s_eps[1], s_eps[2], s_eps[3])  # must match cspline_masses! internal log_ref
+    masses_eps = zeros(4)
+    cspline_masses!(masses_eps, a_eps_s, s_eps, β_L_eps, β_R_eps, κ1_eps, κ3_eps, log_ref_eps)
+    C_eps = sum(masses_eps)
+    C_eps < 1e-300 && return Inf
+    log_C_eps = log(C_eps) + log_ref_eps
+
+    # Solve init density
+    a_init_s = copy(a_init)
+    (a_init_s[2] <= a_init_s[1] || a_init_s[3] <= a_init_s[2]) && return Inf
+    s_init = zeros(3); βLi = Ref(0.0); βRi = Ref(0.0); κ1i = Ref(0.0); κ3i = Ref(0.0)
+    solve_cspline_c2!(s_init, βLi, βRi, κ1i, κ3i, a_init_s, τ, M_init)
+    β_L_init = βLi[]; β_R_init = βRi[]; κ1_init = κ1i[]; κ3_init = κ3i[]
+    log_ref_init = max(s_init[1], s_init[2], s_init[3])  # match cspline_masses!
+    masses_init = zeros(4)
+    cspline_masses!(masses_init, a_init_s, s_init, β_L_init, β_R_init, κ1_init, κ3_init, log_ref_init)
+    C_init = sum(masses_init)
+    C_init < 1e-300 && return Inf
+    log_C_init = log(C_init) + log_ref_init
+
+    # Precompute CDF grid for drawing from densities
+    n_cdf = 2000; cdf_min = -10.0; cdf_max = 10.0
+    cdf_grid = collect(range(cdf_min, cdf_max, length=n_cdf))
+    dg_cdf = (cdf_max - cdf_min) / (n_cdf - 1)
+
+    # Init CDF
+    cdf_init = zeros(n_cdf)
+    @inbounds for g in 1:n_cdf
+        cdf_init[g] = exp(cspline_eval(cdf_grid[g], a_init_s, s_init, β_L_init, β_R_init, κ1_init, κ3_init) - log_ref_init) / C_init
+    end
+    cdf_init .*= dg_cdf; cumsum!(cdf_init, cdf_init); cdf_init ./= cdf_init[end]
+
+    # Transition solver buffers
+    hv = zeros(K+1); t = zeros(3); s_tr = zeros(3)
+    βLt = Ref(0.0); βRt = Ref(0.0); κ1t = Ref(0.0); κ3t = Ref(0.0)
+    buf = SplineSolverBuffers()
+
+    total_ll = 0.0
+
+    @inbounds for i in 1:N
+        # Average over R simulated paths
+        log_sum = -Inf  # log(Σ_r exp(log_lik_r))
+        for r in 1:R
+            # Draw η₁ from init density
+            idx = searchsortedfirst(cdf_init, U[r, i, 1])
+            idx = clamp(idx, 1, n_cdf)
+            η = cdf_grid[idx]
+
+            # log p(y₁|η₁) = log f_eps(y₁-η₁)
+            log_lik = cspline_eval(y[i,1]-η, a_eps_s, s_eps, β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_C_eps
+
+            for t_step in 2:T_obs
+                # Draw η_t from transition T(·|η_{t-1})
+                z = η / σy
+                hv[1]=1.0; K>=1 && (hv[2]=z)
+                for k in 2:K; hv[k+1] = z*hv[k] - (k-1)*hv[k-1]; end
+                for l in 1:3; t[l] = dot(view(a_Q,:,l), hv); end
+                if t[2] <= t[1] || t[3] <= t[2]
+                    log_lik = -Inf; break
+                end
+
+                solve_cspline_c2!(s_tr, βLt, βRt, κ1t, κ3t, t, τ, M_Q, buf)
+                # Build CDF for transition and draw
+                cdf_tr = zeros(n_cdf)
+                lr_tr = s_tr[1]
+                for g in 1:n_cdf
+                    cdf_tr[g] = exp(cspline_eval(cdf_grid[g], t, s_tr, βLt[], βRt[], κ1t[], κ3t[]) - lr_tr)
+                end
+                cdf_tr .*= dg_cdf; cumsum!(cdf_tr, cdf_tr); cdf_tr ./= cdf_tr[end]
+
+                idx = searchsortedfirst(cdf_tr, U[r, i, t_step])
+                idx = clamp(idx, 1, n_cdf)
+                η = cdf_grid[idx]
+
+                # log p(y_t|η_t)
+                log_lik += cspline_eval(y[i,t_step]-η, a_eps_s, s_eps, β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_C_eps
+            end
+
+            # log-sum-exp accumulation
+            if log_lik > log_sum
+                log_sum = log_lik + log(1.0 + exp(log_sum - log_lik))
+            elseif isfinite(log_lik)
+                log_sum += log(1.0 + exp(log_lik - log_sum))
+            end
+        end
+        log_sum -= log(R)  # divide by R
+        isinf(log_sum) && return Inf
+        total_ll += log_sum
+    end
+
     -total_ll / N
 end
 
@@ -1633,24 +1760,34 @@ end
 #  DATA GENERATION
 # ================================================================
 
-"""Draw from cubic spline density by inverse CDF on fine grid."""
+"""Draw from cubic spline density by rejection sampling with Gaussian proposal.
+The density has Gaussian tails (κ_mean = -1/σ²), so a Gaussian proposal
+matched to the mode (t₂) and curvature gives high acceptance rate."""
 function cspline_draw(rng::AbstractRNG, t::Vector{Float64}, s::Vector{Float64},
-                      β_L::Float64, β_R::Float64, M1::Float64, M3::Float64, C::Float64;
-                      grid_min=-8.0, grid_max=8.0, n_grid=500)
-    grid = collect(range(grid_min, grid_max, length=n_grid))
-    dg = (grid_max - grid_min) / (n_grid - 1)
-    cdf = zeros(n_grid)
-    @inbounds for g in 1:n_grid
-        cdf[g] = exp(cspline_eval(grid[g], t, s, β_L, β_R, M1, M3)) / C
+                      β_L::Float64, β_R::Float64, M1::Float64, M3::Float64, C_shifted::Float64;
+                      grid_min=-8.0, grid_max=8.0)
+    log_ref = max(s[1], s[2], s[3])
+    # Proposal: Gaussian centered at mode (≈ t₂), σ from average curvature
+    mode = t[2]  # median knot ≈ mode for symmetric density
+    # Average curvature: κ_mean ≈ (M1+M3)/2, σ² = -1/κ_mean
+    κ_avg = (M1 + M3) / 2.0
+    σ_prop = κ_avg < -1e-10 ? sqrt(-1.0/κ_avg) : 2.0  # fallback σ=2
+    # Log of target density (unnormalized): S(x) - log_ref
+    # Log of proposal: -½((x-mode)/σ)² - log(σ√2π)
+    # Log envelope: log_M = max over x of [S(x)-log_ref + ½((x-mode)/σ)² + log(σ√2π)]
+    # ≈ s₂-log_ref + log(σ√2π) at x=mode (since S(mode)≈s₂ and Gaussian term=0)
+    log_M = s[2] - log_ref + log(σ_prop * sqrt(2π)) + 0.5  # +0.5 safety margin
+
+    for _ in 1:10000
+        x = mode + σ_prop * randn(rng)
+        log_f = cspline_eval(x, t, s, β_L, β_R, M1, M3) - log_ref
+        log_g = -0.5*((x-mode)/σ_prop)^2 - log(σ_prop*sqrt(2π))
+        if log(rand(rng)) < log_f - log_g - log_M
+            return x
+        end
     end
-    cdf .*= dg
-    cumsum!(cdf, cdf)
-    cdf ./= cdf[end]
-    # Inverse CDF
-    u = rand(rng)
-    idx = searchsortedfirst(cdf, u)
-    idx = clamp(idx, 1, n_grid)
-    grid[idx]
+    # Fallback (should rarely happen)
+    mode + σ_prop * randn(rng)
 end
 
 # C² version: β determined by spline, quadratic tails with κ_mean
@@ -2171,12 +2308,19 @@ function cspline_ffbs!(eta_draw::Matrix{Float64},
                        y::Matrix{Float64}, K::Int, σy::Float64, τ::Vector{Float64},
                        rng::AbstractRNG; G::Int=201)
     N, T_obs = size(y)
+    # Ensure G = 4k+1 for Boole's rule
     G = isodd(G) ? G : G+1
+    while (G - 1) % 4 != 0; G += 2; end
     grid = collect(range(-8.0, 8.0, length=G))
     h_grid = (grid[end] - grid[1]) / (G-1)
-    sw = zeros(G); sw[1]=1.0; sw[G]=1.0
-    @inbounds for i in 2:G-1; sw[i] = iseven(i) ? 4.0 : 2.0; end
-    sw .*= h_grid/3
+    # Boole's rule weights (same as MLE's forward filter)
+    sw = zeros(G)
+    sw[1] = 7.0; sw[G] = 7.0
+    @inbounds for i in 2:G-1
+        r = (i - 1) % 4
+        sw[i] = r == 0 ? 14.0 : r == 1 ? 32.0 : r == 2 ? 12.0 : 32.0
+    end
+    sw .*= 2h_grid/45
 
     # Build transition matrix (C²)
     T_mat = zeros(G, G)
