@@ -1343,6 +1343,7 @@ function cspline_neg_loglik(a_Q::Matrix{Float64}, M_Q::Float64,
     # Init density (C² with κ_mean = M_init)
     ws.a_init_s .= a_init
     (ws.a_init_s[2] <= ws.a_init_s[1] || ws.a_init_s[3] <= ws.a_init_s[2]) && return Inf
+    (ws.a_init_s[2]-ws.a_init_s[1] < 1e-6 || ws.a_init_s[3]-ws.a_init_s[2] < 1e-6) && return Inf
     βLi_ref = Ref(0.0); βRi_ref = Ref(0.0)
     κ1i_ref = Ref(0.0); κ3i_ref = Ref(0.0)
     solve_cspline_c2!(ws.s_buf, βLi_ref, βRi_ref, κ1i_ref, κ3i_ref, ws.a_init_s, τ, M_init, ws.c1buf)
@@ -1363,11 +1364,15 @@ function cspline_neg_loglik(a_Q::Matrix{Float64}, M_Q::Float64,
     # Eps density (C² with κ_mean = M_eps)
     ws.a_eps_s[1] = a_eps1; ws.a_eps_s[2] = 0.0; ws.a_eps_s[3] = a_eps3
     (ws.a_eps_s[2] <= ws.a_eps_s[1] || ws.a_eps_s[3] <= ws.a_eps_s[2]) && return Inf
+    # Guard: knots too close → solver won't converge
+    (ws.a_eps_s[2]-ws.a_eps_s[1] < 1e-6 || ws.a_eps_s[3]-ws.a_eps_s[2] < 1e-6) && return Inf
     βLe_ref = Ref(0.0); βRe_ref = Ref(0.0)
     κ1e_ref = Ref(0.0); κ3e_ref = Ref(0.0)
     solve_cspline_c2!(ws.s_buf, βLe_ref, βRe_ref, κ1e_ref, κ3e_ref, ws.a_eps_s, τ, M_eps, ws.c1buf)
     β_L_eps = βLe_ref[]; β_R_eps = βRe_ref[]
     κ1_eps = κ1e_ref[]; κ3_eps = κ3e_ref[]
+    # Guard: solver output must be finite
+    (isnan(ws.s_buf[1]) || isnan(ws.s_buf[3]) || isnan(β_L_eps) || isnan(β_R_eps)) && return Inf
     log_ref_eps = ws.s_buf[1]
     @inbounds for g in 1:G
         v = cspline_eval(ws.grid[g], ws.a_eps_s, ws.s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps)
@@ -1376,6 +1381,8 @@ function cspline_neg_loglik(a_Q::Matrix{Float64}, M_Q::Float64,
     cspline_masses!(ws.masses_buf, ws.a_eps_s, ws.s_buf, β_L_eps, β_R_eps, κ1_eps, κ3_eps, log_ref_eps)
     C_eps_shifted = ws.masses_buf[1]+ws.masses_buf[2]+ws.masses_buf[3]+ws.masses_buf[4]
     C_eps_shifted < 1e-300 && return Inf
+    # Guard: masses must be finite (solver convergence check)
+    any(isnan, ws.masses_buf) && return Inf
 
     total_ll = 0.0
 
@@ -2502,13 +2509,18 @@ function estimate_cspline_ml(y::Matrix{Float64}, K::Int, σy::Float64,
         a_Q, M_Q, a_init, M_init, a_eps1, a_eps3, M_eps = unpack_cspline(v, K)
         val = cspline_neg_loglik(a_Q, M_Q, a_init, M_init,
                                   a_eps1, a_eps3, M_eps, y, K, σy, τ, ws)
-        isinf(val) ? 1e10 : val
+        (isinf(val) || isnan(val)) ? 1e10 : val
     end
 
     function grad!(g, v)
         if use_analytical_grad
             val = cspline_neg_loglik_and_grad!(g, v, y, K, σy, τ, ws)
-            isinf(val) && fill!(g, 0.0)
+            if isinf(val) || isnan(val) || any(isnan, g)
+                # Point back toward starting point (large gradient to escape infeasible region)
+                @. g = 100.0 * (v - v0)
+                norm_g = sqrt(sum(abs2, g))
+                norm_g > 0 && (@. g = g / norm_g * 10.0)  # normalize to magnitude 10
+            end
         else
             ws.vtmp .= v
             @inbounds for j in 1:np
@@ -2520,6 +2532,12 @@ function estimate_cspline_ml(y::Matrix{Float64}, K::Int, σy::Float64,
                 fm = obj(ws.vtmp)
                 ws.vtmp[j] = v[j]
                 g[j] = (fp - fm) / (2 * h_j)
+            end
+            # Guard NaN in numerical gradient
+            if any(isnan, g)
+                @. g = 100.0 * (v - v0)
+                norm_g = sqrt(sum(abs2, g))
+                norm_g > 0 && (@. g = g / norm_g * 10.0)
             end
         end
     end
