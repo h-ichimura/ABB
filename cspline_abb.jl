@@ -1368,41 +1368,39 @@ function cspline_neg_loglik(a_Q::Matrix{Float64}, M_Q::Float64,
     total_ll = 0.0
 
     # Views for the active portion of the grid
-    p_v = view(ws.p, 1:G)
-    p_new_v = view(ws.p_new, 1:G)
-    pw_v = view(ws.pw, 1:G)
-    sw_v = view(ws.sw, 1:G)
-    T_v = view(ws.T_mat, 1:G, 1:G)
     grid_v = view(ws.grid, 1:G)
 
-    # Log-density buffer for logspace_integrate
+    # Log-density buffer for logspace normalization
     log_p = zeros(G)
+    pw_buf = zeros(G)
+    p_new_v = view(ws.p_new, 1:G)
+    T_v = view(ws.T_mat, 1:G, 1:G)
 
     @inbounds for i in 1:N
-        # t=1: log p(g) = log f_init(g) + log f_eps(y₁-g)
+        # ---- t=1: log p(g) = log f_init(g) + log f_eps(y₁-g) ----
         for g in 1:G
             log_p[g] = log(max(ws.f_init[g], 1e-300)) +
                         cspline_eval(y[i,1]-ws.grid[g], ws.a_eps_s, ws.s_buf,
                                      β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps_shifted)
         end
-        # Normalize using log-space integration (exact exp(cubic) on each segment)
+        # Normalize using logspace integration (exact exp(cubic) per segment)
         L1 = logspace_integrate(log_p, grid_v, G)
         L1 < 1e-300 && return Inf
         total_ll += log(L1)
-        # Store normalized p for prediction step
+        # Normalized p for prediction step
         @inbounds for g in 1:G; ws.p[g] = exp(log_p[g]) / L1; end
 
         for t_step in 2:T
-            # Prediction: p_pred(g') = Σ_g T(g,g') × p(g) × sw(g)
-            # Still use matrix-vector (prediction integral needs T which depends on g)
-            @inbounds for g in 1:G; ws.pw[g] = ws.p[g] * ws.sw[g]; end
-            mul!(p_new_v, transpose(T_v), pw_v)
+            # ---- Prediction: p_pred = T' × (p ⊙ sw) via matrix-vector ----
+            # (logspace not beneficial here: log T has complex η-dependence)
+            @inbounds for g in 1:G; pw_buf[g] = ws.p[g] * ws.sw[g]; end
+            mul!(p_new_v, transpose(T_v), view(pw_buf, 1:G))
 
-            # Observation update: log p_new(g) = log p_pred(g) + log f_eps(y_t - g)
+            # ---- Observation update in log-space ----
             for g in 1:G
-                lp_pred = log(max(ws.p_new[g], 1e-300))
-                log_p[g] = lp_pred + cspline_eval(y[i,t_step]-ws.grid[g], ws.a_eps_s, ws.s_buf,
-                                                   β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps_shifted)
+                log_p[g] = log(max(ws.p_new[g], 1e-300)) +
+                            cspline_eval(y[i,t_step]-ws.grid[g], ws.a_eps_s, ws.s_buf,
+                                         β_L_eps, β_R_eps, κ1_eps, κ3_eps) - log_ref_eps - log(C_eps_shifted)
             end
             Lt = logspace_integrate(log_p, grid_v, G)
             Lt < 1e-300 && return Inf
