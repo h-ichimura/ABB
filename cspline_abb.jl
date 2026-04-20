@@ -2851,10 +2851,13 @@ function estimate_profiled_ml(y::Matrix{Float64}, K::Int, σy::Float64,
 end
 
 # ================================================================
-#  LOUIS (1982) OBSERVED INFORMATION MATRIX
+#  LOUIS (1982) MISSING INFORMATION
 #
-#  I_Y = E[B(X,θ)|Y] - E[S(X,θ)S'(X,θ)|Y]     (at MLE where S*=0)
-#      = I_X - I_{X|Y}                            (missing information principle)
+#  I_{X|Y} = Var[S(X,θ) | Y] = Var[∂S_spline/∂θ | Y]
+#
+#  The score S = ∂S_spline/∂θ − ∂log C/∂θ. The ∂log C/∂θ term is
+#  constant in η (depends only on θ), so it drops out of the variance.
+#  We only need the variance of the SPLINE EVALUATION derivatives.
 #
 #  Complete data X = (η₁,...,η_T), observed Y = (y₁,...,y_T).
 #  Uses forward-backward smoother for E[·|Y].
@@ -2862,23 +2865,19 @@ end
 # ================================================================
 
 """
-Compute observed information via Louis (1982): I_Y = E[B|Y] - E[SS'|Y].
+Compute missing information I_{X|Y} = Var[∂S_spline/∂θ | Y] via Louis (1982).
 
-B is block diagonal (θ_Q, θ_init, θ_eps).
-E[SS'|Y] has cross-block terms from joint distribution of (η_s,η_t)|Y.
+∂S_spline/∂θ is the derivative of the spline EVALUATION (not log-density)
+at each data point. The normalizing constant ∂log C/∂θ drops from the variance.
 
-Key: S = S_init(η₁) + Σ_t S_trans(η_t,η_{t-1}) + Σ_t S_eps(y_t-η_t)
-SS' requires pairwise joints p(η_s,η_t|Y), computed from forward-backward.
+For each density component, ∂S(x;θ)/∂θ is computed by FD of cspline_eval
+w.r.t. packed parameters (not log f, which would include log C).
 
-Parameter blocks for profiled model (14 total):
-  θ_Q:    v[1:9]   (transition quantile params)
-  θ_init: v[10:12] (init quantile params)
-  θ_eps:  v[13:14] (eps quantile params)
-
-Returns (I_Y, E_B, E_SS, sum_ES).
+Returns (I_miss_per_i, Var_S_spline) — the per-individual missing information
+matrix, averaged over N individuals.
 """
-function louis_information(v::Vector{Float64}, y::Matrix{Float64},
-                            K::Int, σy::Float64, τ::Vector{Float64}; G::Int=201)
+function louis_missing_information(v::Vector{Float64}, y::Matrix{Float64},
+                                    K::Int, σy::Float64, τ::Vector{Float64}; G::Int=201)
     a_Q, M_Q, a_init, M_init, a_eps1, a_eps3, M_eps = unpack_profiled(v, K)
     N, T_obs = size(y)
     nk = K + 1; np = length(v)
