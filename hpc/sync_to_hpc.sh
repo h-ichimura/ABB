@@ -13,6 +13,10 @@ rsync -avz \
     --include='hpc/submit_comparison.sh' \
     --include='hpc/run_hpc_comparison.jl' \
     --include='hpc/collect_comparison.jl' \
+    --include='hpc/submit_profiled.sh' \
+    --include='hpc/run_profiled_comparison.jl' \
+    --include='hpc/collect_profiled.jl' \
+    --include='louis_missing_info.jl' \
     --include='hpc/collect_cspline.jl' \
     --include='hpc/setup_julia.sh' \
     --include='hpc/setup_julia_gpu.sh' \
