@@ -239,7 +239,8 @@ function compute_missing_info(v::Vector{Float64}, y::Matrix{Float64},
 end
 
 # ================================================================
-#  MAIN: compute and display
+#  MAIN: compute and display (only runs when executed directly)
+if abspath(PROGRAM_FILE) == @__FILE__
 # ================================================================
 
 K=2; σy=1.0; τ=[0.25,0.50,0.75]; N=100
@@ -279,7 +280,9 @@ end
 
 # Off-diagonal blocks: correlation between init and eps params
 @printf("\nCorrelation between init and eps parameters (off-diagonal of Var):\n")
-for j in idx_init, k in idx_eps
+for j in 10:12, k in 13:14
     corr = Var_S[j,k] / sqrt(max(Var_S[j,j]*Var_S[k,k], 1e-30))
     @printf("  Corr(%s, %s) = %.4f\n", param_names[j], param_names[k], corr)
 end
+
+end # if abspath(PROGRAM_FILE) == @__FILE__
