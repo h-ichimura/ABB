@@ -432,25 +432,125 @@ I_Y = E[B(X,\theta) \mid Y] - \text{Var}[S(X,\theta) \mid Y]
     = I_X - I_{X \mid Y},
 \end{equation}
 where $X = (\eta_1, \ldots, \eta_T)$ is the complete data,
-$I_X = E[B \mid Y]$ is the complete-data information (block diagonal in
-$\theta_Q$, $\theta_{\text{init}}$, $\theta_\varepsilon$), and
+$I_X = E[B \mid Y]$ is the complete-data information, and
 $I_{X \mid Y} = \text{Var}[S \mid Y]$ is the missing information from
 not observing $\eta$.
 
-\subsubsection*{Block Diagonal Structure}
+\subsubsection*{Complete-Data Log-Likelihood and Block Structure}
 
 The complete-data log-likelihood decomposes as
-\[
+\begin{equation}\label{eq:complete_ll}
 \lambda(X, \theta) = \log f_{\eta_1}(\eta_1; \theta_{\text{init}})
 + \sum_{t=2}^T \log f(\eta_t \mid \eta_{t-1}; \theta_Q)
 + \sum_{t=1}^T \log f_\varepsilon(y_t - \eta_t; \theta_\varepsilon).
+\end{equation}
+Since the three components depend on disjoint parameter blocks
+$\theta = (\theta_Q, \theta_{\text{init}}, \theta_\varepsilon)$,
+the complete-data information $I_X = E[B \mid Y]$ is \emph{block diagonal}:
+\[
+I_X = \text{diag}(I_X^Q, \, I_X^{\text{init}}, \, I_X^\varepsilon).
 \]
-Since the three components depend on disjoint parameter blocks, the
-complete-data information $I_X = E[B \mid Y]$ is \emph{block diagonal}.
 The cross-parameter correlations in $I_Y$ arise entirely from the missing
 information $I_{X \mid Y} = \text{Var}[S \mid Y]$, which has off-diagonal
 blocks because conditioning on $Y$ induces correlations between the
 scores of different components through the shared latent $\eta$.
+
+\subsubsection*{Spline Evaluation Decomposition}
+
+Each log-density in \eqref{eq:complete_ll} has the form
+$\log f(x; \theta) = S(x; \theta) - \log C(\theta)$,
+where $S$ is the cubic spline evaluation and
+$C(\theta) = \int \exp(S(x;\theta))\,dx$ is the normalising constant.
+The complete-data score therefore decomposes as
+\begin{equation}\label{eq:score_decomp}
+\frac{\partial \log f(x;\theta)}{\partial \theta}
+= \underbrace{\frac{\partial S(x;\theta)}{\partial \theta}}_{\text{depends on }\eta}
+- \underbrace{\frac{\partial \log C(\theta)}{\partial \theta}}_{\text{constant in }\eta}.
+\end{equation}
+Since $\partial \log C / \partial \theta$ does not depend on $\eta$,
+it drops out of the conditional variance:
+\begin{equation}\label{eq:var_decomp}
+I_{X \mid Y} = \text{Var}\!\left[\frac{\partial S}{\partial \theta}\,\bigg|\, Y\right].
+\end{equation}
+This is a crucial simplification: we only need the variance of the
+\emph{spline evaluation derivatives}, not the full score.
+The normalising constant, which dominates the magnitude of the score,
+contributes nothing to the missing information.
+
+\subsubsection*{Explicit Formula for $I_{X|Y}$}
+
+Define the spline-evaluation score at time $t$ as
+\[
+\dot{S}_t(\eta) \equiv
+\begin{cases}
+\dfrac{\partial S_{\text{init}}(\eta_1)}{\partial \theta_{\text{init}}}
++ \dfrac{\partial S_\varepsilon(y_1 - \eta_1)}{\partial \theta_\varepsilon},
+& t = 1, \\[6pt]
+\dfrac{\partial S_{\text{trans}}(\eta_t \mid \eta_{t-1})}{\partial \theta_Q}
++ \dfrac{\partial S_\varepsilon(y_t - \eta_t)}{\partial \theta_\varepsilon},
+& t \ge 2.
+\end{cases}
+\]
+The total spline-evaluation score is $\dot{S} = \sum_{t=1}^T \dot{S}_t$.
+The missing information for individual $i$ is
+\begin{equation}\label{eq:missing_info}
+I_{X \mid Y}^{(i)} = E[\dot{S}\,\dot{S}' \mid Y_i]
+- E[\dot{S} \mid Y_i]\, E[\dot{S} \mid Y_i]'.
+\end{equation}
+The expectations are over $p(\eta_1, \ldots, \eta_T \mid Y_i)$, computed
+from the forward-backward smoother.
+
+Note that $\dot{S}_1$ depends on $\eta_1$ alone, while $\dot{S}_t$ for
+$t \ge 2$ depends on the pair $(\eta_{t-1}, \eta_t)$.
+Thus $E[\dot{S}\,\dot{S}' \mid Y]$ involves:
+\begin{itemize}
+\item marginal expectations $E[g(\eta_t) \mid Y]$ from the smoothed
+  distribution $\gamma_t$;
+\item pairwise expectations $E[g(\eta_{t-1}, \eta_t) \mid Y]$ from
+  the joint smoothed distribution
+  $\xi_t(g_1, g_2) \propto \alpha_{t-1}(g_1)\, T(g_1, g_2)\,
+  f_\varepsilon(y_t - g_2)\, \beta_t(g_2)$;
+\item cross-time expectations for non-adjacent pairs, computed via
+  the Markov factorisation
+  $p(\eta_1, \eta_2, \eta_3 \mid Y) \propto
+  \alpha_1(\eta_1)\, T(\eta_1,\eta_2)\, f_\varepsilon(y_2-\eta_2)\,
+  T(\eta_2,\eta_3)\, f_\varepsilon(y_3-\eta_3)\, \beta_3(\eta_3)$.
+\end{itemize}
+All of these are computable on the discrete $\eta$-grid used for the
+forward filter.
+
+The total missing information is $I_{X \mid Y} = \sum_{i=1}^N I_{X \mid Y}^{(i)}$,
+and the observed information is $I_Y = I_X - I_{X \mid Y}$.
+
+\subsubsection*{Interpretation}
+
+The block structure of $I_X$ and the full-matrix structure of $I_{X|Y}$
+have a clear interpretation.
+If $\eta$ were observed, the three parameter blocks
+$(\theta_Q, \theta_{\text{init}}, \theta_\varepsilon)$ would be
+\emph{independently} estimable from separate components of the
+log-likelihood \eqref{eq:complete_ll}.
+The epsilon parameters $\theta_\varepsilon$ would be estimated directly
+from the residuals $\hat\varepsilon_t = y_t - \eta_t$, achieving full
+$\sqrt{N}$ efficiency.
+Not observing $\eta$ introduces two effects:
+\begin{enumerate}
+\item \textbf{Information loss}: each diagonal block of $I_Y$ is
+  smaller than the corresponding block of $I_X$ by the amount
+  $I_{X|Y}^{(\text{block})}$.
+  Parameters whose spline evaluation varies strongly with $\eta$
+  lose more information.
+\item \textbf{Cross-block correlation}: the off-diagonal blocks of
+  $I_{X|Y}$ show that $\theta_{\text{init}}$ and $\theta_\varepsilon$
+  become correlated through the shared uncertainty about $\eta_1$
+  in the convolution $f(y_1) = \int f_{\eta_1}(\eta)\, f_\varepsilon(y_1 - \eta)\, d\eta$.
+\end{enumerate}
+
+This is precisely the deconvolution problem: recovering $f_\varepsilon$
+from the convolution $f_y = f_\eta * f_\varepsilon$ loses information
+about the shape of $f_\varepsilon$, particularly in directions where
+$\partial S_\varepsilon / \partial \theta_\varepsilon$ has high variance
+conditional on $Y$.
 
 \subsubsection*{Eigenvalue Analysis}
 
@@ -488,6 +588,51 @@ The curvature parameters ($M_\varepsilon, M_Q$) rank 3rd and 6th ---
 substantially less well identified than the location parameters.
 This is consistent with the simulation finding that MLE has high variance
 for these parameters.
+
+\subsubsection*{Missing Information Decomposition}
+
+Table~\ref{tab:missing_info} reports the diagonal of
+$I_{X|Y} / N = \text{Var}[\partial S / \partial \theta \mid Y]$ per individual,
+computed from \eqref{eq:missing_info} using the forward-backward smoother
+($N = 100$, $G = 201$, $T = 3$, profiled model at the true parameter).
+
+\begin{table}[H]
+\centering
+\caption{Missing information $\text{Var}[\partial S_{\text{spline}}/\partial\theta_j \mid Y]$
+per individual (profiled model, $T = 3$, $N = 100$).
+Larger values indicate more information lost from not observing $\eta$.}
+\label{tab:missing_info}
+\begin{tabular}{lcc}
+\toprule
+Parameter & Var (per individual) & $\sqrt{\text{Var}}$ \\
+\midrule
+$\log(-a_{\varepsilon,1})$ & \textbf{3.52} & 1.88 \\
+$\log(a_{\varepsilon,3})$  & \textbf{3.43} & 1.85 \\
+$a_{Q,\text{med},2}$ (quadratic) & 2.43 & 1.56 \\
+$a_{Q,\text{med},0}$ (intercept) & 1.38 & 1.18 \\
+$a_{Q,\text{med},1}$ ($\rho$) & 1.14 & 1.07 \\
+$\delta_{R2}$ (right gap slope) & 0.60 & 0.78 \\
+$\delta_{L2}$ (left gap slope) & 0.53 & 0.72 \\
+$\log(g_R)$ (init right gap) & 0.46 & 0.68 \\
+$\log(g_L)$ (init left gap) & 0.43 & 0.66 \\
+init median & 0.07 & 0.27 \\
+$\delta_{L1}, \delta_{R1}$ (gap intercepts) & $< 0.001$ & $< 0.02$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The epsilon quantile parameters $(\log(-a_{\varepsilon,1}), \log(a_{\varepsilon,3}))$
+have the \emph{largest} missing information (Var $\approx 3.5$), confirming
+that these parameters lose the most from the deconvolution.
+The leading eigenvector of $I_{X|Y}$ (eigenvalue $5.79$) points in the
+IQR direction of $\varepsilon$ --- precisely the parameter combination
+that QR estimates well from direct residuals but MLE struggles with.
+
+In contrast, the initial median has almost zero missing information
+(Var $= 0.07$), consistent with its direct identification from $y_1$.
+The transition slope $\rho$ has moderate missing information (Var $= 1.14$),
+explaining why MLE catches up to QR for this parameter with more time periods
+(Table~\ref{tab:T_comparison}).
 
 \subsection{Global Identification}
 
