@@ -3618,6 +3618,228 @@ function mc_comparison(; S::Int=20, N::Int=300, G::Int=201,
     flush(stdout)
 end
 
+# ================================================================
+#  ABB ORIGINAL: PIECEWISE UNIFORM DENSITY
+#
+#  Between quantile knots: uniform (constant density)
+#  Tails: exponential, rate matched for continuity at boundary knots
+#  No curvature parameter — tail rate = 1/h determined by knot spacing
+#
+#  For knots t₁ < t₂ < t₃ at τ = [0.25, 0.50, 0.75]:
+#    Left tail (x < t₁): f = (0.25/h₁) exp((x-t₁)/h₁)
+#    [t₁, t₂):           f = 0.25/h₁
+#    [t₂, t₃]:           f = 0.25/h₂
+#    Right tail (x > t₃): f = (0.25/h₂) exp(-(x-t₃)/h₂)
+# ================================================================
+
+"""Evaluate log-density of piecewise uniform model at x, given knots t."""
+function abb_uniform_logf(x::Float64, t::Vector{Float64})
+    h1 = t[2] - t[1]; h2 = t[3] - t[2]
+    LOG025 = -1.3862943611198906  # log(0.25)
+    if x < t[1]
+        return LOG025 - log(h1) + (x - t[1]) / h1
+    elseif x < t[2]
+        return LOG025 - log(h1)
+    elseif x <= t[3]
+        return LOG025 - log(h2)
+    else
+        return LOG025 - log(h2) - (x - t[3]) / h2
+    end
+end
+
+"""Build transition matrix using piecewise uniform density."""
+function abb_uniform_transition_matrix!(T_mat::Matrix{Float64},
+                                        grid::Vector{Float64}, G::Int,
+                                        a_Q::Matrix{Float64},
+                                        K::Int, σy::Float64)
+    hv = zeros(K+1); t = zeros(3)
+
+    @inbounds for g1 in 1:G
+        z = grid[g1] / σy
+        hv[1]=1.0; K>=1 && (hv[2]=z)
+        for k in 2:K; hv[k+1] = z*hv[k] - (k-1)*hv[k-1]; end
+        for l in 1:3; t[l] = dot(view(a_Q,:,l), hv); end
+
+        if t[2] <= t[1] || t[3] <= t[2]
+            for g2 in 1:G; T_mat[g1,g2] = 1e-300; end
+            continue
+        end
+
+        # Find log_ref for numerical stability
+        log_ref = abb_uniform_logf(t[1], t)  # = log(0.25/h₁) at left uniform piece
+        lr2 = abb_uniform_logf(t[2]+1e-10, t)  # right uniform piece
+        log_ref = max(log_ref, lr2)
+
+        # Evaluate and normalize
+        C = 0.0
+        @inbounds for g2 in 1:G
+            T_mat[g1,g2] = exp(abb_uniform_logf(grid[g2], t) - log_ref)
+        end
+        # Analytical normalizing constant (exact = 1 by construction, but
+        # on the discrete grid we need numerical normalization)
+        # Use quadrature weights if available, or just normalize row
+        row_sum = 0.0
+        h_grid = grid[2] - grid[1]
+        @inbounds for g2 in 1:G; row_sum += T_mat[g1,g2] * h_grid; end
+        if row_sum > 1e-300
+            @inbounds for g2 in 1:G; T_mat[g1,g2] /= row_sum; end
+        else
+            @inbounds for g2 in 1:G; T_mat[g1,g2] = 1e-300; end
+        end
+    end
+end
+
+"""FFBS using ABB piecewise uniform density in E-step."""
+function abb_uniform_ffbs!(eta_draw::Matrix{Float64},
+                           a_Q::Matrix{Float64},
+                           a_init::Vector{Float64},
+                           a_eps1::Float64, a_eps3::Float64,
+                           y::Matrix{Float64}, K::Int, σy::Float64,
+                           rng::AbstractRNG; G::Int=201)
+    N, T_obs = size(y)
+    G = isodd(G) ? G : G+1
+    grid = collect(range(-8.0, 8.0, length=G))
+    h_grid = grid[2] - grid[1]
+
+    # Build transition matrix (piecewise uniform)
+    T_mat = zeros(G, G)
+    abb_uniform_transition_matrix!(T_mat, grid, G, a_Q, K, σy)
+
+    # Init density (piecewise uniform)
+    f_init = zeros(G)
+    if a_init[2] > a_init[1] && a_init[3] > a_init[2]
+        for g in 1:G
+            f_init[g] = exp(abb_uniform_logf(grid[g], a_init))
+        end
+        C = sum(f_init) * h_grid
+        C > 1e-300 && (f_init ./= C)
+    else
+        fill!(f_init, 1.0/G)
+    end
+
+    # Eps density (piecewise uniform)
+    a_eps = [a_eps1, 0.0, a_eps3]
+    if a_eps[2] > a_eps[1] && a_eps[3] > a_eps[2]
+        # precompute nothing — evaluate on the fly
+    else
+        a_eps = [-0.5, 0.0, 0.5]  # fallback
+    end
+
+    # Forward pass
+    filter_p = zeros(G, N, T_obs)
+    p = zeros(G); p_new = zeros(G)
+
+    @inbounds for i in 1:N
+        for g in 1:G
+            lf_eps = abb_uniform_logf(y[i,1] - grid[g], a_eps)
+            p[g] = f_init[g] * exp(lf_eps)
+        end
+        L = sum(p) * h_grid
+        L > 1e-300 ? (p ./= L) : fill!(p, 1.0/G)
+        filter_p[:, i, 1] .= p
+
+        for t_step in 2:T_obs
+            # Predict: p_new[g2] = Σ_{g1} T[g1,g2] * p[g1] * h_grid
+            fill!(p_new, 0.0)
+            @inbounds for g1 in 1:G
+                pw = p[g1] * h_grid
+                pw < 1e-300 && continue
+                for g2 in 1:G
+                    p_new[g2] += T_mat[g1, g2] * pw
+                end
+            end
+            # Update with observation
+            for g in 1:G
+                lf_eps = abb_uniform_logf(y[i,t_step] - grid[g], a_eps)
+                p_new[g] *= exp(lf_eps)
+            end
+            L = sum(p_new) * h_grid
+            L > 1e-300 ? (p_new ./= L) : fill!(p_new, 1.0/G)
+            filter_p[:, i, t_step] .= p_new
+            p .= p_new
+        end
+    end
+
+    # Backward sampling
+    cdf = zeros(G)
+    @inbounds for i in 1:N
+        # Sample η_T
+        for g in 1:G; cdf[g] = filter_p[g, i, T_obs] * h_grid; end
+        cumsum!(cdf, cdf); cdf ./= cdf[end]
+        idx = searchsortedfirst(cdf, rand(rng))
+        eta_draw[i, T_obs] = grid[clamp(idx, 1, G)]
+
+        # Backward: η_{t-1} | η_t
+        for t_step in (T_obs-1):-1:1
+            g_next = clamp(round(Int, (eta_draw[i, t_step+1] - grid[1]) / h_grid) + 1, 1, G)
+            for g in 1:G
+                p[g] = T_mat[g, g_next] * filter_p[g, i, t_step] * h_grid
+            end
+            cumsum!(cdf, p); cdf ./= cdf[end]
+            idx = searchsortedfirst(cdf, rand(rng))
+            eta_draw[i, t_step] = grid[clamp(idx, 1, G)]
+        end
+    end
+    eta_draw
+end
+
+"""
+ABB original QR estimation with piecewise uniform density in E-step.
+Same M-step as C² spline QR, but the forward-backward smoother uses
+piecewise constant density between quantile knots.
+"""
+function estimate_abb_uniform_qr(y::Matrix{Float64}, K::Int, σy::Float64,
+                                  a_Q0::Matrix{Float64},
+                                  a_init0::Vector{Float64},
+                                  a_eps10::Float64, a_eps30::Float64,
+                                  τ::Vector{Float64};
+                                  G::Int=201, S_em::Int=50, M_draws::Int=20,
+                                  verbose::Bool=true, seed::Int=1)
+    N, T_obs = size(y)
+    rng = MersenneTwister(seed)
+
+    a_Q = copy(a_Q0)
+    a_init = copy(a_init0)
+    a_eps1 = a_eps10; a_eps3 = a_eps30
+
+    eta_draw = zeros(N, T_obs)
+
+    for iter in 1:S_em
+        a_Q_sum = zeros(K+1, length(τ))
+        a_init_sum = zeros(length(τ))
+        ae1_sum = 0.0; ae3_sum = 0.0
+
+        for m in 1:M_draws
+            abb_uniform_ffbs!(eta_draw, a_Q, a_init, a_eps1, a_eps3,
+                              y, K, σy, rng; G=G)
+            qr_est = cspline_qr_mstep(eta_draw, y, K, σy, τ)
+            a_Q_sum .+= qr_est.a_Q
+            a_init_sum .+= qr_est.a_init
+            ae1_sum += qr_est.a_eps1
+            ae3_sum += qr_est.a_eps3
+        end
+
+        a_Q .= a_Q_sum ./ M_draws
+        a_init .= a_init_sum ./ M_draws
+        a_eps1 = ae1_sum / M_draws
+        a_eps3 = ae3_sum / M_draws
+
+        if verbose && (iter <= 5 || iter % 10 == 0)
+            @printf("  ABB-QR iter %3d: ρ=%.4f  a_init=[%.3f,%.3f,%.3f]  a_eps=[%.3f,%.3f]\n",
+                    iter, a_Q[2,2], a_init..., a_eps1, a_eps3)
+            flush(stdout)
+        end
+    end
+
+    # Compute M from IQR for output compatibility
+    M_Q = _M_from_iqr(a_Q[1,3] - a_Q[1,1])
+    M_init = _M_from_iqr(a_init[3] - a_init[1])
+    M_eps = _M_from_iqr(a_eps3 - a_eps1)
+
+    (a_Q=a_Q, a_init=a_init, a_eps1=a_eps1, a_eps3=a_eps3,
+     M_Q=M_Q, M_init=M_init, M_eps=M_eps)
+end
+
 if abspath(PROGRAM_FILE) == @__FILE__
     mc_comparison(S=20, N=300)
 end

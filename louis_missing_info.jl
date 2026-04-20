@@ -10,7 +10,9 @@ which are much smaller than the full score and don't suffer from
 cancellation with the normalizing constant.
 =#
 
-include("cspline_abb.jl")
+if !@isdefined(CSplineWorkspace)
+    include("cspline_abb.jl")
+end
 using Printf, LinearAlgebra, Statistics
 
 function compute_missing_info(v::Vector{Float64}, y::Matrix{Float64},
